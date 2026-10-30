@@ -566,12 +566,21 @@ surveys; each names the report that proved it.
     mechanic from `AttackPos` / `OffhandPos`, which the renderer writes and `weaponStabilised`
     never touches, and take grab state from `BT_OFFHANDATTACK` (the trigger) rather than the
     grip. With no offhand weapon the latch has nothing to switch off.
-    **And the render skip is narrower than it looks:** both skips test
-    `psp->GetCaller() == player->OffhandWeapon` (`hw_weapon.cpp:832`, `:917`) — the *caller*,
-    not the layer id. A psprite layer whose caller is not the offhand `Weapon` **keeps
-    rendering**. So a plain overlay layer plus a world actor survives stabilisation intact,
-    which is why 07_SHIELDS_PARRY recommends plate-actor-plus-overlay over an offhand weapon,
-    and it frees the offhand slot for a real weapon besides.
+    **The render skip tests the CALLER, not the layer id** — both skips are
+    `if (weaponStabilised && psp->GetCaller() == player->OffhandWeapon) continue;`
+    (`hw_weapon.cpp:832`, `:917`), inside loops that cover every layer below
+    `PSP_TARGETCENTER` (`:830`, `:915`).
+    **But "use an overlay layer and you are safe" is WRONG, and the distinction is where a
+    real shipped bug lives.** `A_Overlay` creates its psprite with
+    `P_CreatePsprite(player, stateowner, layer)` (`p_pspr.cpp:1241`), so an overlay fired from
+    an offhand weapon's own state gets **that weapon as its caller** and is skipped exactly
+    like the weapon's main layer — whatever layer number you chose. Only a psprite given an
+    **explicit different `newcaller`** through `P_SetPsprite` / `GetPSprite(layer, newcaller)`
+    escapes the skip.
+    So the safe patterns are: a world actor, or a psprite whose caller is deliberately set to
+    something that is not the offhand weapon. Not merely "a different layer".
+    (Found by 03_SABER_AND_SAW, where a blade on `A_Overlay` layer 2000052 vanishes under the
+    grip while still cutting; verified here.)
     Where you genuinely need an offhand weapon, detect
     `player.WeaponState & WF_TWOHANDSTABILIZED` and warn; never try to clear it.
     (08_BOWS found it; 02_VEHICLES §4.3a and 07_SHIELDS_PARRY §2.4 worked out the defences)

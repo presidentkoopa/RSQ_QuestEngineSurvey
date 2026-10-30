@@ -26,30 +26,46 @@ src/rendering/gl/stereo3d/gl_openvr.cpp:1733-1740   weaponoffset   (from dominan
 src/rendering/gl/stereo3d/gl_openvr.cpp:1763-1770   offhandoffset  (from offhandControllerPose)
 ```
 
-That is the **OpenVR / SteamVR** path. Three facts follow, all verified by grep over the whole tree:
+That is the **OpenVR / SteamVR** path, and on PC it is the *only* one:
 
-1. **There is no OpenXR input code anywhere in this tree.** Zero hits for `xrSyncActions`,
-   `xrLocateSpace`, `xrGetActionStatePose`, `xrGetActionStateFloat`.
-   `src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp` only *reads* those globals
-   (`extern` at `:116`, consumed at `:452-458` and `:586-611`) — it never fills them.
-   They are defined, unwritten, in `src/QzDoom/qzdoom_common.cpp:10`.
-2. **`ENABLE_OPENVR` defaults to `NO`** — `src/CMakeLists.txt:418`.
-3. **`VR_HapticEvent` is an empty function body** — `src/QzDoom/qzdoom_common.cpp:65-67`.
-   (But see §1.6: haptics as such *do* work on the OpenVR path — it is this particular entry
-   point that is a stub, and ZScript that has no binding to either.)
+1. **The OpenXR device file is not compiled on PC at all.** All of
+   `src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp` sits inside `#ifdef USE_OPENXR`
+   (`:32` … `:792`), and `USE_OPENXR` is defined in **exactly one place in the whole tree**:
+   `mobile/Android_src.mk:15` — the Android/Quest build. No CMake file defines it.
+2. **There is no OpenXR input code in this tree either.** Zero hits for `xrSyncActions`,
+   `xrLocateSpace`, `xrGetActionStatePose`, `xrGetActionStateFloat`. The OpenXR file only
+   *reads* the hand globals (`extern` at `:116`, consumed at `:452-458`, `:586-611`); on Quest
+   they are filled by the QzDoom native layer, which is **not in this repository**.
+3. **`USE_OPENVR` is defined only under `option(ENABLE_OPENVR … NO)`** —
+   `src/CMakeLists.txt:418-420`. It defaults to **off**.
+4. **`VR_HapticEvent` is an empty function body** — `src/QzDoom/qzdoom_common.cpp:65-67`.
+   (Haptics themselves *do* work on the OpenVR path — see §1.6 and §1.6a. It is this particular
+   entry point that is a stub.)
 
-**What this means for a modder:** on PC, hand tracking reaches script only in a build configured
-with `ENABLE_OPENVR=YES` and running through SteamVR/OpenVR. If the shipped binary your team
-targets runs on an OpenXR runtime instead (Virtual Desktop's VDXR, Oculus's own OpenXR runtime,
-WMR), then on the evidence in *this* tree the hand-pose fields are never populated and every
-hand-driven design in this survey reads zeros.
+**So there are exactly two shapes a working build can have:**
 
-**This is unresolved and it is a go/no-go.** It is not a reason to discard the survey — the
-engine capabilities documented here are real, and on the Quest build the Android/QzDoom native
-layer supplies these same globals. But before a team commits a week to a hand-driven mechanic,
-somebody must confirm which backend the target build actually uses. The test is cheap: print
-`AttackPos` and `OffhandPos` from ZScript in the real build and see whether they move and
-whether they differ from each other.
+| Build | VR path | Hand poses filled by | Operative citations |
+|---|---|---|---|
+| **PC** | OpenVR / SteamVR, only if built `ENABLE_OPENVR=YES` | `gl_openvr.cpp:1331-1343`, `:1733-1770` | `src/rendering/gl/stereo3d/gl_openvr.cpp` |
+| **Quest / Android** | OpenXR | QzDoom native layer, **absent from this repo** | `hw_openxrdevice.cpp`, unverifiable here |
+
+**How to read the citations in this survey.** Several reports lead with
+`hw_openxrdevice.cpp` line numbers because that file is the clearer read. Those are *parallel*
+to the OpenVR ones and were checked against them — but **on a PC build the `gl_openvr.cpp`
+citations are the operative ones**, and the OpenXR file is not even compiled. Where a report
+gives only an OpenXR citation for something load-bearing, verify it against `gl_openvr.cpp`
+before relying on it.
+
+**What a team must confirm before committing to a hand-driven mechanic** — cheap, and it is the
+first open question in several reports:
+
+1. Which of `USE_OPENVR` / `USE_OPENXR` / neither the target binary was compiled with.
+2. That `AttackPos` and `OffhandPos` actually move in the real build, and differ from each
+   other. Print them from `DoEffect` for a few tics. If they are equal, you are on the non-VR
+   fallback (`hw_vrmodes.cpp:440-444`) and every hand design in this survey reads the viewpoint.
+
+This is not a reason to discard the survey — the engine capabilities documented here are real on
+both paths. It is a reason to spend five minutes before spending a week.
 
 ---
 
@@ -245,7 +261,40 @@ So a mod **can** fire independent per-hand rumble today, from the ordinary ZScri
 `A_QuakeEx`, with no view motion: intensity X drives the left hand, Y the right.
 It is a **HACK / S** — short 10 ms pulses, so re-fire per tic for sustained feel; depends on the
 user's `vr_quake_haptic_level`; and a user who has raised `r_quakeintensity` gets shake with it.
-Full write-up in `99_OVERLOOKED.md` §1a.
+
+> **Pass `damrad = 0`.** `A_QuakeEx`'s `thrustMultiplier` defaults to **0.5**
+> (`actor.zs:1284`) and the thrust adds *randomised velocity to the player*
+> (`a_quake.cpp:205-209`), inside a block gated on `dist < m_DamageRadius` (`:191`) that can
+> also damage them (`:193-203`). With `damrad = 0` the whole block is skipped. Without it your
+> haptic feedback shoves the player sideways. Also never pass `QF_GROUNDONLY` (`:354`) — it
+> mutes airborne mechanics. And `QuakePower` is random (`r_utility.cpp:911-921`), so this is
+> noise: fine for a thud, useless for a crisp click.
+
+Full write-up, both routes compared, in `99_OVERLOOKED.md` §1a.
+
+**And a second, simpler route — `LineAttack` (07_SHIELDS_PARRY found it).** `P_LineAttack`
+buzzes the firing hand whenever a player deals damage:
+
+```
+src/playsim/p_map.cpp:4764-4769
+  if (damage > 0) {
+      long rightHanded = vr_control_scheme < 10;
+      rightHanded = (flags & LAF_ISOFFHAND) ? 1 - rightHanded : rightHanded;
+      vrmode->Vibrate(150, rightHanded ? 1 : 0, 0.8);
+  }
+```
+
+It is **not** gated on `LAF_NOINTERACT`, so a trace that does nothing in the world still
+buzzes. `LineAttack(angle, 0.1, pitch, 1, "None", "NullPuff", LAF_NOINTERACT|LAF_ISOFFHAND)`
+gives a 150 ms / 0.8 pulse on the chosen hand and no other effect.
+
+Compared with `A_QuakeEx`: this one **respects the user's handedness** (`vr_control_scheme`)
+and needs no extra cvar, but duration and intensity are **literals** — every pulse feels the
+same, so a light tap and a heavy block are indistinguishable. `A_QuakeEx` is shapeable but
+cruder. Use `LineAttack` for a discrete thump, `A_QuakeEx` when you need an envelope.
+
+Note also `p_map.cpp:4771-4774`: when `weaponStabilised` is set, the engine buzzes **both**
+hands. Worth knowing before you read a double pulse as a bug.
 
 ### 1.7 VR cvars a mod can read
 
@@ -508,12 +557,24 @@ surveys; each names the report that proved it.
       check a design against real hardware dimensions.
     - Which means: **motorcycle bars (0.65–0.85 m) are safe by construction; a car steering
       wheel is not** — a 0.37 m wheel puts hands at 9-and-3 about 0.36 m apart, inside the trap.
+    **It is OpenVR-only in this tree.** `weaponStabilised` is a single global
+    (`qzdoom_common.cpp:19`) and its only writes anywhere are `gl_openvr.cpp:1723` and `:1726`;
+    the OpenXR path never sets it. So on a Quest/OpenXR build it does not fire **today** — but
+    it is one patch from doing so, and "silently broken under SteamVR" is still broken. Design
+    as though it fires.
     **The robust defence is not geometry, it is to use no offhand weapon at all** — drive the
     mechanic from `AttackPos` / `OffhandPos`, which the renderer writes and `weaponStabilised`
     never touches, and take grab state from `BT_OFFHANDATTACK` (the trigger) rather than the
-    grip. With no offhand weapon the latch has nothing to switch off. Where you genuinely need
-    one, detect `player.WeaponState & WF_TWOHANDSTABILIZED` and warn; never try to clear it.
-    (08_BOWS found it; 02_VEHICLES §4.3a worked out the defence)
+    grip. With no offhand weapon the latch has nothing to switch off.
+    **And the render skip is narrower than it looks:** both skips test
+    `psp->GetCaller() == player->OffhandWeapon` (`hw_weapon.cpp:832`, `:917`) — the *caller*,
+    not the layer id. A psprite layer whose caller is not the offhand `Weapon` **keeps
+    rendering**. So a plain overlay layer plus a world actor survives stabilisation intact,
+    which is why 07_SHIELDS_PARRY recommends plate-actor-plus-overlay over an offhand weapon,
+    and it frees the offhand slot for a real weapon besides.
+    Where you genuinely need an offhand weapon, detect
+    `player.WeaponState & WF_TWOHANDSTABILIZED` and warn; never try to clear it.
+    (08_BOWS found it; 02_VEHICLES §4.3a and 07_SHIELDS_PARRY §2.4 worked out the defences)
 11. **`+NOINTERACTION` is a trap** — it forces `MF_NOBLOCKMAP` (`p_mobj.cpp:3988-3992`), taking
     the actor out of the world. To hold something still *and* keep it collidable, use
     `freezetics` (`actor.zs:265`), which early-returns out of `Tick` (`p_mobj.cpp:3948-3952`)

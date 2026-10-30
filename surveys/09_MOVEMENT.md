@@ -53,13 +53,17 @@ speed is close to free. Comfort is the real constraint, and it is sharply limite
 **script cannot change view pitch, roll or yaw in VR** — the HMD overwrites all three after
 `R_SetupFrame` (`src/rendering/hwrenderer/hw_entrypoint.cpp:117` then `:143` →
 `src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:740-741`, `:750`). No dash roll, no
-wall-run camera bank, and equally no accidental nausea from them. Haptics would be the natural
-substitute and are also closed: `VRMode::Vibrate` is a real working implementation
-(`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`) with no ZScript binding (W2). What is left is
-the flat full-screen blend `player.BlendR/G/B/A` (`player.zs:3120-3123`, drawn per eye at
-`hw_entrypoint.cpp:200-201`), camera *position* (which script can still move), sound, and the
-weapon psprite — so every mechanic gets a blink/fade variant rather than a tunnelling vignette,
-and the impact of every mechanic is sold in the sprite layer rather than at the camera.
+wall-run camera bank, and equally no accidental nausea from them. Haptics are the natural
+substitute and they **are** reachable: `A_QuakeEx` (`wadsrc/static/zscript/actors/actor.zs:1284`)
+routes intensity X and Y to the left and right controllers independently
+(`src/rendering/r_utility.cpp:1085-1091`), while the camera shake that normally accompanies a quake
+is off by default in VR (`r_quakeintensity` is 0.0f, "Defaulted to 0 for VR",
+`src/rendering/r_utility.cpp:116`) — per-hand rumble with no view motion, which is exactly the
+channel W7 took away. That is a HACK rather than a clean API (W2), but it works today. With it,
+plus the flat full-screen blend `player.BlendR/G/B/A` (`player.zs:3120-3123`, drawn per eye at
+`hw_entrypoint.cpp:200-201`), camera *position* (which script can still move), sound and the weapon
+psprite, every mechanic can be given real impact and a blink/fade comfort variant without ever
+touching the view.
 
 ---
 
@@ -343,9 +347,15 @@ resolution depends on a shorter player (sliding under something) requires
   `A_SetViewRoll` (`actor.zs:1275-1277`) are overwritten by the HMD pose. No dash roll, no
   wall-run bank. This is a constraint *and* a safety net: the most common VR-comfort mistake is
   not available to make.
-- **Haptics** — a working implementation exists on the OpenVR path but has **no ZScript binding**
-  (W2). Treat as unavailable, and note that with W7 also closed, sound and the weapon psprite are
-  the *only* remaining channels for selling impact.
+- **Haptics — available as a HACK via `A_QuakeEx`, per-hand, with no view motion.**
+  `A_QuakeEx(intensityX, intensityY, ...)` (`actor.zs:1284`) → `DEarthquake` → left/right
+  controller (`src/rendering/r_utility.cpp:1085-1091`); view shake is separately gated on
+  `r_quakeintensity`, which defaults to 0 in VR (`r_utility.cpp:116`, applied `:1065-1082`).
+  **Always pass `damrad = 0` and `thrustMultiplier = 0`** or the quake will add randomised velocity
+  to the player (`src/playsim/mapthinkers/a_quake.cpp:206-211`) and fight your own movement code.
+  Never pass `QF_GROUNDONLY` — it disables the effect off the floor (`a_quake.cpp:354`). Full
+  caveats in W2. This is the primary impact channel for every mechanic in §4; sound and the weapon
+  psprite are the others.
 - **No eye-space vignette.** Script 2D drawing in VR is composited as a world-locked quad at
   `vr_hud_distance`/`vr_hud_scale` (`hw_openxrdevice.cpp:299-301`), not as an eye overlay, so a
   tunnelling ring drawn in `RenderOverlay` would appear as a floating billboard. See §5.
@@ -382,6 +392,8 @@ above 80% within 8 tics with the same sign.
 **Feel tuning knobs.** `dashSpeed`, `dashTics`, cooldown, whether `bNOFRICTION` holds for the whole
 dash or releases at 60%, whether direction locks at the start or steers during.
 
+**Haptic signature.** Both hands, one sharp tic: `A_QuakeEx(0.6, 0.6, 0, 2, 0, 256, "", QF_SHAKEONLY, thrustMultiplier: 0)` on the frame the dash fires. `damrad = 0` and `thrustMultiplier = 0` are mandatory — see W2. This is what replaces the camera punch W7 denies you.
+
 **Comfort variant.** *Blink dash.* Instead of velocity: `CheckMove` the destination
 (`actor.zs:832`, with `PCM_DROPOFF` cleared so you don't blink off a ledge), raise
 `player.BlendA` to 1.0 over 2 tics, `SetOrigin` (`actor.zs:753`) or `TryMove` (`actor.zs:831`) to
@@ -415,6 +427,8 @@ otherwise bleed your dash and nothing else will.
 **Feel tuning knobs.** Air dash count per jump, whether `Vel.Z` is zeroed, hang-time (set
 `Gravity = 0.2` for the dash's duration via `actor.zs:176`), horizontal speed relative to the
 ground dash.
+
+**Haptic signature.** A lighter version of 4.1 on launch, and a second, heavier double-hand pulse on landing. Do **not** pass `QF_GROUNDONLY` — it would mute exactly the airborne part (W2).
 
 **Comfort variant.** The blink variant is *worse* in the air than on the ground — a blink with no
 ground plane for reference is badly disorienting. Comfort air dash instead = short, slow, and with
@@ -451,6 +465,8 @@ Slide under low ceilings is free: `CheckCrouch` already refuses to stand up when
 **Feel tuning knobs.** Entry speed threshold, decay rate, whether the slide gets a speed *boost* on
 entry, steer authority during the slide, minimum slide duration.
 
+**Haptic signature.** A low sustained buzz re-fired every tic for the slide's duration, tapering with speed — the 10 ms pulse length (W2) means per-tic re-firing is how you get sustain, and it lets the rumble decay with the slide instead of ending abruptly.
+
 **Comfort variant.** **Do not dip the camera.** The obvious flourish — drop `player.viewheight`
 (`player.zs:681`) for the slide — moves the VR camera (`r_utility.cpp:1023`, `:1236`) with no matching
 head movement, and that is textbook vestibular conflict. In VR the player's head is *already* low,
@@ -475,6 +491,8 @@ a backstep cannot walk you off a ledge you cannot see.
 
 **Feel tuning knobs.** Distance, duration, i-frames (if the mod has them), whether it cancels a
 reload.
+
+**Haptic signature.** One short double-hand pulse. Keep it lighter than the forward dash — a backstep should read as evasive, not as impact.
 
 **Comfort variant.** Backward optical flow is the worst case in VR — the player sees the world
 rushing toward them from a direction their head is not facing. **Default the backstep to blink**
@@ -534,12 +552,14 @@ including during the run. It saves and restores `Vel`, so it will not eat your v
 player who leans away from the wall will physically translate off it. Build the re-grab window to
 tolerate a tic or two of lost contact.
 
+**Haptic signature — this is where the per-hand split earns its keep.** Drive only the axis matching the wall side: `intensityX` for a wall on the left, `intensityY` for one on the right (`src/rendering/r_utility.cpp:1086-1091`). A continuous low buzz in the hand nearest the wall, re-fired per tic, tells the player which side they are attached to without a single degree of camera motion. On the exit jump, a sharp pulse in both hands. This substantially recovers what W7 took away, and it is the strongest argument for building the mechanic at all.
+
 **Comfort variant.** This is the mechanic most likely to make people ill, because it is sustained
 and lateral. Comfort wall run =
 
 - **Camera bank is not on the table at all** (W7) — `A_SetViewRoll` does not reach the headset.
   The cinematic instinct to roll into the wall is simply unavailable, which here is a mercy. Sell
-  the wall contact on the weapon psprite and on sound instead.
+  the wall contact on the per-hand rumble above, the weapon psprite, and sound instead.
 - **No `SetViewPos` lateral shove** (`actor.zs:1278`) — this one *does* reach the headset
   (§3.6) and would be the same mistake by another route.
 - **Constant tangential speed, not accelerating.** Steady optical flow is tolerable; changing flow
@@ -577,6 +597,8 @@ on the second jump, that is the `ApplyAirControl` override (`player.zs:1328`) or
 downward velocity first (it should — a double jump that cannot save a bad fall feels broken),
 whether it adds horizontal velocity in the stick direction.
 
+**Haptic signature.** A light both-hands blip on the second jump, and a firmer one on landing. Use it instead of the landing viewheight kick.
+
 **Comfort variant.** The gentlest mechanic here: vertical motion with the head upright is the best
 tolerated axis, and the arc is self-limiting. Comfort variant = cap the second jump's `Vel.Z` so
 the total apex is not much higher than a single jump, and **do not add a landing viewheight kick**
@@ -599,7 +621,8 @@ at all, make it a weapon-psprite dip, not a camera dip.
 | Wall run | BUILDABLE | L | Auto-detect + stick | Wall *hang*, no roll |
 | Double jump | BUILDABLE | S | Button | Capped apex, no landing kick |
 | Eye-space comfort vignette | **WALL** | — | — | — (W1) |
-| Script-driven haptic feedback | **WALL** | — | — | — (W2) |
+| Per-hand haptic feedback via `A_QuakeEx` | **HACK** | S | — | On by default; degrades silently at `vr_quake_haptic_level 0` (W2) |
+| Direct haptic API (`VRMode::Vibrate` binding) | **WALL** | — | — | — (W2) |
 | Camera roll / pitch for feel | **WALL** | — | — | — (W7) |
 | Offhand-grip / two-hand-brace gesture as a trigger | **WALL** | — | — | — (W9) |
 
@@ -621,29 +644,74 @@ strength — e.g. a `vr_vignette`-style uniform applied in `screen->PostProcessS
 (`src/rendering/hwrenderer/hw_entrypoint.cpp:198`) and a `PlayerInfo` field to drive it.
 Until then, the comfort fallback is uniform dimming via `BlendA`, which costs the whole image.
 
-**W2 — Haptics exist and work, but script cannot reach them. This is the sharpest wall in the
-report, because W7 took away the obvious alternative.** The picture is more precise than
-BASELINE §4 implied, and the distinction matters:
+**W2 (revised) — Haptics have no direct ZScript binding, but `A_QuakeEx` is a working back door.
+Not a WALL. HACK / S.**
 
-- **`VRMode::Vibrate(duration, channel, intensity)` is a real, working implementation** on the
-  OpenVR path — `OpenVRMode::Vibrate` (`src/rendering/gl/stereo3d/gl_openvr.h:121-124`) forwards to
-  `OpenVRHaptics::Vibrate` (`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`), which queues
-  per-channel duration and intensity for `ProcessHaptics` to play, gated on `vr_enable_haptics`
-  (`src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:125`). Declared on the base class at
-  `src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`.
-- **`VR_HapticEvent` is an empty stub** on this build — `src/QzDoom/qzdoom_common.cpp:65-67` has no
-  body. So the named-event calls scattered through the playsim (e.g. `src/playsim/p_user.cpp:1301-1304`
-  for heal/heartbeat) do nothing here, and provoking one is not even a HACK route.
-- **Neither is bound to ZScript.** No thunk for either.
+I previously wrote that haptics were unreachable and that W7 + W2 together left only sound and the
+weapon psprite. **That was wrong, and it was this report's headline, so read the correction first:**
+an ordinary ZScript action function gets you independent per-hand rumble with no view motion.
 
-So a dash, a wall-grab and a landing have **no tactile confirmation available to a mod at all**.
-Combined with W7 (no camera pitch or roll), the two channels a VR movement mechanic would normally
-use to sell impact are both closed, and the mod is left with sound and the weapon psprite.
-**Exact missing piece:** a ZScript-callable `PlayerInfo.Vibrate(hand, duration, intensity)` thunking
-to `VRMode::Vibrate`. Note what that is and is not — **a binding over an existing, working
-implementation, not a new feature.** One thunk, additive, no behaviour change for existing callers,
-and by far the highest feel-per-line change available to this topic. OpenXR parity needs checking
-separately before anyone commits to it.
+**The route.** `A_QuakeEx` (`wadsrc/static/zscript/actors/actor.zs:1284`) spawns a `DEarthquake`
+thinker; the view code collects its intensities each frame
+(`DEarthquake::StaticGetQuakeIntensities`, `src/playsim/mapthinkers/a_quake.cpp:341-371`) and feeds
+them straight to the controllers, **one hand per axis**:
+
+```
+src/rendering/r_utility.cpp:1085   if (vr_quake_haptic_level > 0.0) {
+src/rendering/r_utility.cpp:1086       double left  = QuakePower(vr_quake_haptic_level, jiggers.Intensity.X, jiggers.Offset.X);
+src/rendering/r_utility.cpp:1087       double right = QuakePower(vr_quake_haptic_level, jiggers.Intensity.Y, jiggers.Offset.Y);
+src/rendering/r_utility.cpp:1090       vrmode->Vibrate(10, 0, (float)left);    // LEFT hand
+src/rendering/r_utility.cpp:1091       vrmode->Vibrate(10, 1, (float)right);   // RIGHT hand
+```
+
+So `intensityX` → left hand, `intensityY` → right hand, independently.
+
+**And the camera shake that would normally come with it is off by default in VR.** The view-offset
+branches above it use `quakeFactor = r_quakeintensity` (`src/rendering/r_utility.cpp:1065`,
+applied `:1067-1082`), and `r_quakeintensity` defaults to **0.0f** with the literal comment
+"Defaulted to 0 for VR" (`src/rendering/r_utility.cpp:116`). The haptic branch reads
+`vr_quake_haptic_level` instead (default 0.8, `hw_vrmodes.cpp:127`), so by default you get rumble
+with **zero view motion** — which is exactly the channel W7 took away.
+
+**What this buys this topic.** A dash can thump, a landing can thud, a wall run can buzz the hand
+nearest the wall and leave the other silent. Per-mechanic use is in §4.
+
+**Caveats, all of which must be carried into any implementation:**
+
+- **Set `damrad = 0`.** Quake damage *and actor thrust* are gated on `dist < m_DamageRadius`
+  (`a_quake.cpp:191`), and the thrust adds randomised velocity to the player
+  (`a_quake.cpp:206-211`). For a movement mod that is catastrophic — your dash would be perturbed by
+  your own feedback. `damrad = 0` disables both; `tremrad` must still be > 0 for the player to be
+  inside the tremor (`a_quake.cpp:361`). Belt and braces: `QF_SHAKEONLY` (`constants.zs:677`)
+  suppresses damage, and `thrustMultiplier = 0` suppresses thrust (default is **0.5**,
+  `actor.zs:1284`).
+- **Do not set `QF_GROUNDONLY`** (`constants.zs:675`) — it drops the quake when the victim is off
+  the floor (`a_quake.cpp:354`), killing the effect for air dash, double jump and wall run,
+  i.e. the three mechanics that need it most.
+- **`vr_quake_haptic_level` is a user cvar** (`hw_vrmodes.cpp:127`) and the whole branch is skipped
+  at 0 (`r_utility.cpp:1085`). Detect it and degrade; never assume rumble landed.
+- **A user who has raised `r_quakeintensity` gets camera shake along with it.** That is their
+  choice, but it means the mechanic is not unconditionally view-free. Worth saying in the mod's
+  options text.
+- **`Vibrate` is hard-coded to a 10 ms pulse** (`r_utility.cpp:1090-1091`), and the queued duration
+  is decremented by real frame time in `ProcessHaptics` (`gl_openvr.cpp:530-560`). Sustained feel
+  therefore means re-firing per tic — which is a feature, not a tax: it lets you **shape** the
+  envelope, a single spike for a dash versus a swell over several tics for a landing.
+- **The intensity is noise, not a clean pulse.** `QuakePower` returns a random value in
+  `[-intensity, +intensity]` (`src/rendering/r_utility.cpp:911-921`). Good for a thud or a buzz;
+  it will not give you a crisp click.
+- **This is the OpenVR path** (`OpenVRHaptics::Vibrate`, `gl_openvr.cpp:517-528`), so it inherits
+  the backend question in `00_CAPABILITIES.md` §0. OpenXR parity is unverified here.
+
+**Still true, and still the clean fix:** neither `VRMode::Vibrate`
+(`src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`, real implementation at
+`gl_openvr.cpp:517-528`) nor `VR_HapticEvent` is bound to ZScript, and `VR_HapticEvent` is in any
+case an empty stub on this build (`src/QzDoom/qzdoom_common.cpp:65-67`), so the playsim's named
+haptic calls (e.g. `src/playsim/p_user.cpp:1301-1304`) do nothing. **Exact missing piece:** a
+ZScript-callable `PlayerInfo.Vibrate(hand, duration, intensity)` thunking to `VRMode::Vibrate` —
+**a binding over an existing, working implementation, not a new feature.** One thunk, additive, no
+behaviour change for existing callers. It would turn the HACK above into a BUILDABLE and remove
+every caveat in this entry except the backend question.
 
 **W3 — `A_ChangeVelocity` is dead on the player.** Trap 2 of §0. `actions.zs:63-79` short-circuits
 on `!vr_recoil`, default false (`src/playsim/p_actionfunctions.cpp:90`). Any mod code (or borrowed
@@ -680,10 +748,11 @@ the accumulated HMD yaw (`:750`); OpenVR does the same (`src/rendering/gl/stereo
 (`src/rendering/hwrenderer/scene/hw_drawinfo.cpp:443`). This is correct behaviour — the headset
 must own the head — but it means **no camera tilt on a wall run, no roll on a dash, no recoil
 pitch kick.** Camera *position* is unaffected (§3.6), so viewheight and `SetViewPos` still work.
-**What replaces it:** weapon-psprite motion (which is in the sprite layer and fully scriptable),
-sound, the `BlendA` dim, and — for wall run specifically — the `HmdPosition` lean read, letting
-the player's own head do the banking. Found by the flight survey (`04_FLIGHT_6DOF.md`) and
-confirmed here.
+**What replaces it:** **per-hand haptics via `A_QuakeEx` (W2) — the primary substitute**, since it
+delivers impact directly and, uniquely, can be *sided* to tell the player which wall they are on;
+plus weapon-psprite motion (in the sprite layer and fully scriptable), sound, the `BlendA` dim,
+and — for wall run specifically — the `HmdPosition` lean read, letting the player's own head do
+the banking. Found by the flight survey (`04_FLIGHT_6DOF.md`) and confirmed here.
 
 **W8 — Room-scale Z is discarded.** Positional tracking is applied in XY only and Z is explicitly
 restored (`hw_openxrdevice.cpp:674-686`, `gl_openvr.cpp:2618-2632`). A mechanic cannot read
@@ -698,9 +767,10 @@ ZScript-writable per-player height offset that the collision code honours.
 with the hands closer than 0.50 m sets `weaponStabilised`
 (`src/rendering/gl/stereo3d/gl_openvr.cpp:1716-1727`) — and this is **not** gated on the weapon's
 `bTwoHanded` flag, so it fires for any weapon. The offhand weapon then goes completely dark:
-it fires nothing (`player.zs:393-396`), checks no buttons (`src/playsim/p_pspr.cpp:512-515`),
-and renders nothing, with `WF_TWOHANDSTABILIZED` re-asserted on every state set
-(`p_pspr.cpp:755-757`). Mostly peripheral to locomotion — none of the six designs above need it —
+it fires nothing (`player.zs:393` in `FireWeapon`, `:426` in `FireWeaponAlt`), checks no buttons
+(the `hand == 1` early return in `P_CheckWeaponButtons`, `src/playsim/p_pspr.cpp:755-757`), and
+renders nothing, with `WF_TWOHANDSTABILIZED` re-asserted on every state set
+(`src/playsim/p_pspr.cpp:512-515`, the set itself at `:514`). Mostly peripheral to locomotion — none of the six designs above need it —
 but it rules out two tempting input routes: **a two-handed brace pose as a dash trigger**, and
 **an offhand-weapon "gadget" (grapple, booster) that fires a movement mechanic**. Either will
 silently stop working whenever the player brings their hands together, which is exactly when a
@@ -776,8 +846,19 @@ fades. Those are polish on a mechanic that is not yet proven, and each is an ind
    follows the head at all (§3.5, W8). It defaults to **true**, i.e. off for our purposes. This is
    a product decision — if the answer is no, 4.3 must be re-keyed onto a button and loses its best
    input.
-8. **Given W7, how much of the "feel" can the weapon psprite actually carry?** Every mechanic here
-   loses its camera-motion channel. The psprite is the replacement, but I have not surveyed how far
-   a psprite can be pushed in VR, where it is a tracked 3D model rather than a 2D overlay. If the
-   answer is "not far", the mechanics will land flatter than the designs above imply, and the
-   comfort story becomes "there is nothing to turn off" rather than "we tuned it down".
+8. **Does the `A_QuakeEx` haptic route work on the OpenXR backend?** W2's chain is verified on the
+   OpenVR path (`OpenVRHaptics::Vibrate`, `src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`). The
+   call site in `src/rendering/r_utility.cpp:1085-1091` goes through `VRMode::Vibrate`, which is
+   virtual (`src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`), so whether OpenXR implements it
+   decides whether the primary impact channel exists on the owner's VDXR setup at all. This
+   inherits the backend question in `00_CAPABILITIES.md` §0 and should be settled before any
+   mechanic's feel is designed around rumble.
+9. **How much "feel" must the weapon psprite still carry?** W7 removes the camera-motion channel;
+   W2's haptic route recovers most of the impact, but not all of it. I have not surveyed how far a
+   psprite can be pushed in VR, where it is a tracked 3D model rather than a 2D overlay. If
+   question 8 comes back negative, this becomes load-bearing rather than supplementary.
+10. **Is `pr_torchflicker` consumption in `QuakePower` (`src/rendering/r_utility.cpp:911-921`) a
+   determinism concern?** It is called from the render path, so it should be local-only, but a
+   movement mod firing quakes every tic will consume RNG at frame rate. Worth confirming it does
+   not touch the playsim stream before shipping this multiplayer, given the standing rule about
+   playsim RNG on local paths.

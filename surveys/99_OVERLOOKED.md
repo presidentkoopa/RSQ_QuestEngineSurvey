@@ -64,11 +64,53 @@ you get **independent per-hand rumble with no view shake** — a punch landing i
 threw it, a parry thump on the shield arm, bow-draw tension, engine rev, a mech's alternating
 footfalls (left stride in X, right in Y).
 
-**Caveats, state them when you use it:** `vr_quake_haptic_level` must be > 0 (it is a user cvar,
+### Use this recipe, not a bare call — the defaults will sabotage you
+
+`A_QuakeEx`'s signature (`wadsrc/static/zscript/actors/actor.zs:1284`) ends with
+`… double damageMultiplier = 1, double thrustMultiplier = 0.5, int damage = 0`.
+
+**`thrustMultiplier` defaults to 0.5, and the thrust adds randomised velocity to the player:**
+
+```
+src/playsim/a_quake.cpp:191   if (dist < m_DamageRadius && victim->Z() <= victim->floorz)
+src/playsim/a_quake.cpp:205       if (!(victim->flags7 & MF7_DONTTHRUST) && m_ThrustMultiplier > 0)
+src/playsim/a_quake.cpp:207           DAngle an = victim->Angles.Yaw + DAngle::fromDeg(pr_quake());
+src/playsim/a_quake.cpp:208-209       victim->Vel.X += m_Intensity.X * an.Cos() * m_ThrustMultiplier * thrustfalloff;
+```
+
+and the same block can damage the player (`:193-203`).
+
+Both are gated on `dist < m_DamageRadius`, so **pass `damrad = 0`** and the whole block is
+skipped. Belt and braces: pass `thrustMultiplier = 0` too.
+
+Without that, your haptic confirmation of a dash **shoves the player in a random direction** —
+the feedback perturbs the very motion it is confirming. (Found by 09_MOVEMENT, verified here.)
+
+Also:
+- **Never pass `QF_GROUNDONLY`** (`constants.zs:675`) — the quake is dropped when the victim is
+  off the floor (`a_quake.cpp:354`), which would mute exactly the airborne mechanics (air dash,
+  double jump, wall run) that most need the feedback.
+- **`QuakePower` returns a random value in `[-intensity, +intensity]`**
+  (`r_utility.cpp:911-921`). This is **noise** — good for a thud, a buzz or a rumble, useless
+  for a crisp click.
+
+**Other caveats, state them when you use it:** `vr_quake_haptic_level` must be > 0 (a user cvar,
 so detect and degrade); `Vibrate` hard-codes a 10 ms pulse at `:1090-1091`, so sustained or
 shaped rumble means re-firing each tic; a user who has raised `r_quakeintensity` **will** get
 camera shake with it; and this is the OpenVR path (`OpenVRHaptics::Vibrate`,
 `gl_openvr.cpp:517-528`), so it inherits the backend question in `00_CAPABILITIES.md` §0.
+
+### The other route: `LineAttack`
+
+`P_LineAttack` buzzes the firing hand whenever a player deals damage, and it is **not** gated on
+`LAF_NOINTERACT` (`src/playsim/p_map.cpp:4764-4769`, channel flipped by `LAF_ISOFFHAND` at
+`:4767`). So `LineAttack(angle, 0.1, pitch, 1, "None", "NullPuff", LAF_NOINTERACT|LAF_ISOFFHAND)`
+gives a clean 150 ms / 0.8 pulse on the chosen hand with no world effect, and it respects the
+user's handedness via `vr_control_scheme`. Its duration and intensity are **literals**, so every
+pulse feels identical — a light tap and a heavy block are indistinguishable.
+
+**Pick by what you need:** `LineAttack` for a discrete, correctly-handed thump; `A_QuakeEx` when
+you need a shaped envelope. (`LineAttack` route found by 07_SHIELDS_PARRY.)
 
 Label it **HACK / S** — it abuses the earthquake system — but it is a HACK that works today and
 removes the single biggest feel limitation in this survey.

@@ -519,7 +519,8 @@ square box back into a plate. It is called for missiles — `p_map.cpp:1508-1514
 Projectile resolution in full is `PIT_CheckThing` `p_map.cpp:1589-1717`.
 **Feel knobs:** plate radius vs drawn shield size (under-cover ≈ "you must aim the shield",
 over-cover ≈ "forgiving"); cone half-angle in `CanCollideWith`; whether the plate leads the hand
-by its own half-depth along `OffhandAngle`; an impact sound + psprite recoil offset on
+by its own half-depth along `OffhandAngle`; an impact sound, the §3.5 haptic thump, and a psprite
+recoil offset on
 `DamageMobj`.
 **Label: EXISTS (a `+SOLID` actor blocking a missile is engine behaviour, `p_map.cpp:1677-1680`) +
 BUILDABLE (the plate). Cost: S.**
@@ -565,7 +566,11 @@ Not available on a frozen engine.
 **Player:** presses the offhand trigger (or thrusts the shield forward past a speed threshold) as
 a projectile arrives.
 **Detection:**
-- *Button:* `CheckWeaponButtons(hand)` on the offhand weapon (`player.zs:588`, `:2031`).
+- *Button:* since the shield is not a `Weapon` (§2.4), read the button directly rather than through
+  `CheckWeaponButtons(hand)` (`player.zs:588`, `:2031`, which is offhand-*weapon* machinery and is
+  gated off by `WF_TWOHANDSTABILIZED` at `p_pspr.cpp:755-758` anyway): poll `player.cmd.buttons`
+  against the `BT_*` mask in the plate's `Tick` (`UserCmd.buttons`, `player.zs:4`). This is also
+  immune to the §2.4 trap.
 - *Gesture:* in the shield's `Tick`, keep `prevOffhandPos`; `speed = (OffhandPos - prev).Length() * 35`
   map units/s. 5 m/s = 170 u/s. Baseline §1b: you must difference it yourself; §3: you get 2-4
   samples in a fast swat. Require **two consecutive** tics over threshold or you will fire on
@@ -634,8 +639,12 @@ Two consecutive tics over threshold; refractory period of ~15 tics.
 **Resolution:** `LineAttack(angle, range, pitch, damage, "ShieldBash", "BashPuff", LAF_ISOFFHAND|LAF_ISMELEEATTACK)`
 — the `LAF_ISOFFHAND` branch at `p_map.cpp:4786-4792` makes it originate at `OffhandPos` along
 `OffhandDir`, i.e. genuinely from the shield. Then stagger as §4.6.
+`LAF_ISOFFHAND` works **with no offhand weapon equipped** — it reads `OffhandPos`/`OffhandDir`
+(`p_map.cpp:4786-4792`), and the only `OffhandWeapon` dereference on that path is null-tested
+(`:4811-4816`). So the bash is unaffected by the §2.4 hosting decision.
 **Feel knobs:** speed threshold; range (shield half-depth + 20-40 units); damage scaled by measured
-speed; `+FORCEPAIN` on the puff for a guaranteed stagger; `A_QuakeEx` for impact.
+speed; `+FORCEPAIN` on the puff for a guaranteed stagger; `A_QuakeEx` for impact; the §3.5 haptic
+pulse rides along for free here, since a real bash already has `damage > 0`.
 **Label: BUILDABLE. Cost: S.** (The offhand attack path is already in the engine; only the gesture
 is yours.)
 
@@ -800,6 +809,18 @@ for it, that still works and is unaffected — the suppression only ever targets
     (`src/playsim/actionspecials.h:89`) via `Level.ExecuteSpecial` (`doombase.zs:489`) is
     speed-based and needs a map-authored polyobject. Dead end for hand tracking; worth knowing
     only so nobody spends a day on it.
+11. **An offhand `Weapon` cannot be kept alive through two-handed stabilisation.**
+    `WF_TWOHANDSTABILIZED` is re-asserted on every state set while `weaponStabilised` is true
+    (`p_pspr.cpp:507-515`), so clearing it from script does not stick, and the trigger has no
+    `bTwoHanded` gate (`gl_openvr.cpp:1717-1728`). *Missing piece:* either a `bTwoHanded` /
+    opt-out test at `gl_openvr.cpp:1721`, or a weapon flag that exempts a weapon from
+    stabilisation suppression. *Substitute, and it is a good one:* don't be a weapon — §2.4.
+12. **Haptic duration, channel and intensity are literals.** `Vibrate(150, …, 0.8)` at
+    `p_map.cpp:4768` and `p_mobj.cpp:7555`; nothing varies them. *Missing piece:* a ZScript
+    binding for `VRMode::Vibrate` (`hw_vrmodes.h:93`) — **the single highest-value engine addition
+    for this topic**, one thunk, no new state, immediately useful to every mod in the family.
+    Also: `VR_HapticEvent` is an empty stub (`qzdoom_common.cpp:65-67`) and `QzDoom_Vibrate` has
+    no in-tree definition, so the OpenXR haptic path is unproven here.
 
 **Not a wall, recorded so nobody re-derives it:** the plate's one-tic positional lag is inherent
 (the `Prev` snapshot at `src/p_tick.cpp:151-162` is per-tic by design) but it is **smooth**, not
@@ -810,8 +831,8 @@ split of §3.2, not an engine change.
 
 ## 6. Smallest prototype
 
-One offhand `Weapon` + one plate actor. Should be ~120 lines of ZScript and no new art beyond a
-cube.
+One plate actor + one psprite overlay layer (**not** an offhand `Weapon` — §2.4). Should be ~120
+lines of ZScript and no new art beyond a cube.
 
 1. `class RSQ_ShieldPlate : Actor` — `+SOLID +NOGRAVITY +NOTAUTOAIMED +NEVERTARGET +FORCEINFIGHTING`,
    `RenderStyle "None"`, `Radius 10`, `Height 20`. **No `+DONTINTERPOLATE`, no `+NOINTERACTION`**

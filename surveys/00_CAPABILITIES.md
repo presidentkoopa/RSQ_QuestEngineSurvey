@@ -35,7 +35,8 @@ That is the **OpenVR / SteamVR** path. Three facts follow, all verified by grep 
    They are defined, unwritten, in `src/QzDoom/qzdoom_common.cpp:10`.
 2. **`ENABLE_OPENVR` defaults to `NO`** — `src/CMakeLists.txt:418`.
 3. **`VR_HapticEvent` is an empty function body** — `src/QzDoom/qzdoom_common.cpp:65-67`.
-   Haptics are not merely unexposed to ZScript; on this path they do nothing at all.
+   (But see §1.6: haptics as such *do* work on the OpenVR path — it is this particular entry
+   point that is a stub, and ZScript that has no binding to either.)
 
 **What this means for a modder:** on PC, hand tracking reaches script only in a build configured
 with `ENABLE_OPENVR=YES` and running through SteamVR/OpenVR. If the shipped binary your team
@@ -179,10 +180,45 @@ Per-hand button dispatch already exists in the player code: `CheckWeaponButtons(
 
 **Zero hits for haptic / rumble / vibrate anywhere in `wadsrc/static/zscript`.**
 
-Treat "fire a custom rumble from script" as **unproven**. The cvar list shows the engine fires
-haptics on its own hardcoded events (taking projectile damage, picking something up, firing a
-weapon). A mod that wants rumble on a punch landing has to provoke one of those events, which
-is a HACK, not a clean capability. Topic reports that depend on haptic feedback say so.
+But be precise about what is and is not missing — an early draft of this file overstated it:
+
+- **Haptics genuinely work on the OpenVR path.** `OpenVRHaptics::Vibrate` is a real
+  implementation (`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`), reached through the
+  `VRMode::Vibrate` override (`gl_openvr.h:121-124`), gated on `vr_enable_haptics`.
+- **`VR_HapticEvent` specifically is an empty stub** (`src/QzDoom/qzdoom_common.cpp:65-67`).
+- **Neither is bound to ZScript.**
+
+So the engine's own hardcoded buzzes — firing a weapon, taking projectile damage, picking
+something up, per the `ext_haptic_level_*` cvars — **do fire** on PC/OpenVR. What a mod cannot
+do is call for a rumble of its own: no punch-landed thump, no rising bow-draw tension, no
+engine-rev vibration. Since the buzz is tied to firing a weapon, a mod can provoke one
+indirectly, which is a HACK, not a capability.
+
+Several reports name a ZScript binding for `VRMode::Vibrate` as the **highest-value engine
+addition available** — the implementation already exists, so it is a binding, not a feature.
+
+### 1.6a But there is a back door, and it is good: `A_QuakeEx`
+
+Earthquake intensity is routed into the controllers, **one hand per axis**:
+
+```
+src/rendering/r_utility.cpp:1085-1091
+  if (vr_quake_haptic_level > 0.0) {
+      left  = QuakePower(vr_quake_haptic_level, jiggers.Intensity.X, ...);
+      right = QuakePower(vr_quake_haptic_level, jiggers.Intensity.Y, ...);
+      vrmode->Vibrate(10, 0, left);    // left hand
+      vrmode->Vibrate(10, 1, right);   // right hand
+  }
+```
+
+and the camera shake that would normally accompany it is **off by default in VR** —
+`r_quakeintensity` is `0.0f`, commented "Defaulted to 0 for VR" (`r_utility.cpp:116`).
+
+So a mod **can** fire independent per-hand rumble today, from the ordinary ZScript
+`A_QuakeEx`, with no view motion: intensity X drives the left hand, Y the right.
+It is a **HACK / S** — short 10 ms pulses, so re-fire per tic for sustained feel; depends on the
+user's `vr_quake_haptic_level`; and a user who has raised `r_quakeintensity` gets shake with it.
+Full write-up in `99_OVERLOOKED.md` §1a.
 
 ### 1.7 VR cvars a mod can read
 
@@ -271,12 +307,33 @@ recover a wall's facing at runtime, which is what makes wall-running, rope ancho
 alignment and surface-aware impacts possible *without touching a map*. Several topic reports
 turn on this.
 
-### 3.2 Collision is cylinders
+### 3.2 Collision is a SQUARE prism, not a cylinder
 
-Actors are a `radius` and a `height`; there is no mesh collision. A flat shield, a car body,
-a sword blade — none of them collide as their shape. Every mechanic in this survey that wants
-a non-cylindrical collision volume either approximates it with several actors, fakes it with
-traces, or accepts the cylinder. The shields report works this through in the most detail.
+> **Correction.** An earlier draft of this file said "cylinders", repeating the usual Doom
+> folklore. The shields survey checked it and it is wrong.
+
+The actor-vs-actor test is a **Chebyshev / axis-aligned box** check:
+
+```
+src/playsim/p_map.cpp:1417-1419
+double blockdist = thing->radius + tm.thing->radius;
+if (fabs(thing->X() - cres.Position.X) >= blockdist || fabs(thing->Y() - cres.Position.Y) >= blockdist)
+    return true;   // no hit
+```
+
+with the same shape on the trace path (`src/playsim/p_trace.cpp:695-696`). So an actor of
+`radius` r occupies a **2r × 2r square footprint**, not a circle — and it is **unrotatable**:
+nothing in that test reads `Angles.Yaw`.
+
+Consequences:
+- A "shield plate" blocks a square, and you cannot turn it to face anywhere.
+- Diagonal reach is √2 larger than you expect.
+- Exceptions worth knowing: `projectilepassheight` (missile-only Z window,
+  `p_map.cpp:1620-1643`) and `+ACTLIKEBRIDGE`.
+
+`07_SHIELDS_PARRY.md` §4 works through what to do about it, and concludes one box plus
+`CanCollideWith` beats a grid of small actors — a 3×3 grid costs nine `P_FindFloorCeiling`
+sweeps a tic to buy a shape that is still wrong in orientation.
 
 ---
 
@@ -369,12 +426,33 @@ surveys; each names the report that proved it.
    `gl_openvr.cpp:1467,1471`; OpenXR `hw_openxrdevice.cpp:740-741`; view matrix built at
    `hw_drawinfo.cpp:443`. Screen shake, camera bob, dash roll and wall-run tilt are **WALLs in
    VR**, not design choices. (04_FLIGHT, 03_MECHS, 09_MOVEMENT)
-4. **Room-scale Z is discarded.** Positional tracking is XY-only and explicitly restores Z
-   (`gl_openvr.cpp:2613-2632`); head height is a render-only eye offset
-   (`hw_openxrdevice.cpp:221`) plus crouchfactor. You can *detect* a duck via `HmdPosition`,
-   but the collision volume does not follow. (04_FLIGHT)
-5. **Hard speed cap: `MAXMOVE` = 30 units/tic** — `src/playsim/p_local.h:61`. Airborne friction
-   is skipped (`p_mobj.cpp:2447-2463`), so air movement is lossless. (05_GRAPPLE, 02_VEHICLES)
+4. **Room-scale Z: it depends on one cvar, and the default is the restrictive one.**
+   Positional tracking is XY-only and restores Z (`gl_openvr.cpp:2613-2632`); head height is a
+   render-only eye offset (`hw_openxrdevice.cpp:221`).
+   - At the **default** `vr_crouch_use_button true` (`hw_vrmodes.cpp:122`) a physical duck is
+     **view-only** — you can detect it from `HmdPosition`, but the collision volume stays put.
+   - At `vr_crouch_use_button 0`, the engine drives `crouchfactor` from head height
+     (`hw_openxrdevice.cpp:574-579`) and `PlayerPawn.Tick` sets
+     `Height = FullHeight * crouchfactor` (`player.zs:150-153`, gated on `CanCrouch()`),
+     so the volume **does** follow.
+   Design for both, and read the cvar. (04_FLIGHT, 03_MECHS, 09_MOVEMENT)
+5. **The 30 units/tic cap is CONDITIONAL — it usually does not apply.** `MAXMOVE` is 30
+   (`src/playsim/p_local.h:61`), but the clamp at `p_mobj.cpp:2096-2106` only runs when
+   `(player && COMPATF_WALLRUN)` **or** `((waterlevel >= 1 || crouchfactor < 0.75) && !MF8_NOFRICTION)`.
+   `compatmode` defaults to 0 (`d_main.cpp:621`, `:694`), so `COMPATF_WALLRUN` is **off** by
+   default. Standing, dry, default compat → **no 30-unit cap**. The unconditional ceiling is
+   `VELOCITY_THRESHOLD = 5000` units/tic (`p_mobj.cpp:2107-2111`).
+   At `vr_vunits_per_meter` 34 and 35 tics/s, 1 u/tic ≈ 1.03 m/s ≈ 2.30 mph, so 30 u/tic ≈
+   111 km/h — the cap would not have blocked a car chase even if it did apply, but know that it
+   usually doesn't. Defend anyway: crouching below 0.75 re-enables it.
+   Tunnelling is already handled — `P_XYMovement` substeps at `1 + speed/(radius-1)` with a full
+   `TryMove` each (`p_mobj.cpp:2166-2192`). Real artefact: a blocked substep **aborts the rest of
+   the move** (`:2283-2285`), so a glancing hit stops a fast actor dead instead of deflecting it;
+   restore the tangential component yourself. Airborne friction is skipped
+   (`p_mobj.cpp:2447-2463`), so air movement is lossless — but only at the default
+   `sv_aircontrol`; raising it flips `airfriction` off 1.0 (`g_level.cpp:1928-1931`) and makes
+   every jump lossy. Override `ApplyAirControl` (`player.zs:1325`) instead.
+   (02_VEHICLES, which corrected this; 09_MOVEMENT)
 6. **No velocities — you difference positions.** (§1.3)
 7. **35 Hz sampling of a per-frame value.** Fresh, but sparse. Test chords, not points. (§1.4)
 8. **Haptics are not scriptable.** `VR_HapticEvent` is an empty stub at
@@ -382,16 +460,37 @@ surveys; each names the report that proved it.
    and this is named across several reports as the highest-value engine addition. (§1.6)
 9. **Collision is cylinders.** No shape you draw is the shape that blocks. (§3.2)
 10. **`bTwoHanded` clears the offhand weapon** (`player.zs:1989-1992`) — a two-handed weapon
-    and an offhand gadget cannot coexist without working around this.
+    and an offhand gadget cannot coexist without working around this. Its *only* effects are
+    nulling the other hand's weapon (`player.zs:1977-1993`) and blocking paired hand-swap
+    (`:2498`); it does not enable stabilisation and does not touch rendering. (08_BOWS)
+10a. **THE TWO-HAND TRAP — read this before designing any two-handed mechanic.**
+    `vr_two_handed_weapons` stabilisation is **not** gated on `bTwoHanded`. If the player
+    presses the offhand **grip** button while the hands are within **0.50 m**, the engine sets
+    `weaponStabilised` (`gl_openvr.cpp:1716-1727`) and the offhand weapon goes dark: it fires
+    nothing (`player.zs:393-396`), checks no buttons (`p_pspr.cpp:755-758`), and renders
+    nothing (`hw_weapon.cpp:832-835`, `:917-920`). `WF_TWOHANDSTABILIZED` is **re-asserted on
+    every state set** (`p_pspr.cpp:512-515`), so script cannot durably clear it.
+    Every two-handed pose in this survey — a bow at full draw, hands on handlebars, a
+    two-handed sword grip, sword-and-board brought together — puts the hands inside that
+    window. Detect it and warn the player, or design the pose to stay outside 0.50 m.
+    (08_BOWS, which found it)
 11. **`+NOINTERACTION` is a trap** — it forces `MF_NOBLOCKMAP` (`p_mobj.cpp:3988-3992`), taking
     the actor out of the world. To hold something still *and* keep it collidable, use
     `freezetics` (`actor.zs:265`), which early-returns out of `Tick` (`p_mobj.cpp:3948-3952`)
     but stays in the blockmap. (06_GRAB, 10_TIME)
-12. **`SetOrigin(pos, false)` and bare `Warp` snap** — they call `ClearInterpolation`
-    (`p_maputl.cpp:570`, `p_things.cpp:805`). `SetOrigin(pos, true)` interpolates. `Prev` is
-    re-snapshotted for every actor at the top of every tic before any thinking
-    (`src/p_tick.cpp:151-162`), so any position write during the tic renders smoothly.
-    This decides whether hand-followed objects feel solid or jittery. (06_GRAB, 07_SHIELDS)
+12. **Interpolation cuts both ways — know which side you are on.** `Prev` is re-snapshotted for
+    every actor at the top of every tic, before any thinking (`src/p_tick.cpp:151-162`;
+    `ClearInterpolation()` is `Prev = Pos()`, `actorinlines.h:29-35`).
+    - **If you write a position every tic** (a held object, a shield plate, a puppeted actor),
+      this is your friend: the write renders smoothly. Use `SetOrigin(pos, true)`.
+      `SetOrigin(pos, false)` (`p_maputl.cpp:570`) and bare `Warp` (`p_things.cpp:805`) call
+      `ClearInterpolation` and **snap**. (06_GRAB, 07_SHIELDS)
+    - **If you make an actor move intermittently** (a `freezetics` duty cycle for slow-motion),
+      the same mechanism is why it *strobes*: it moves a full tic's distance on its one live
+      tic, and the renderer lerps that whole step across one tic of frame time instead of
+      spreading it. Step-hold-hold-hold, roughly 8.75 Hz judder at factor 4 — bad in a headset.
+      The missing engine piece is per-actor interpolation stretch. (10_TIME §5.2, which gives
+      the three-tier workaround)
 13. **This is not REMA.** `E:\DOOMWork\UZDXREMA` has a far larger VR surface. Anything you
     remember from there and cannot find here is a WALL here.
 

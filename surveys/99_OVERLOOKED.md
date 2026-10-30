@@ -20,13 +20,58 @@ it is the boundary of a **second render pass with different clearing rules**:
   `PSP_OFFHANDWEAPON` and `PSP_FLASH` (`p_pspr.cpp:1275-1276`)
 - They are given `PSPF_CVARFAST|PSPF_POWDOUBLE` automatically — `p_pspr.cpp:360-362`
 
-**What it could become:** a cockpit frame, a helmet interior, a permanent VR reticle, a damage
-vignette or a persistent hand model that survives weapon switches and overlay clears without a
-custom statusbar. For mechs and vehicles this is close to purpose-built.
+**What it could become:** persistent **hand-mounted instruments** — a wrist panel, a permanent
+gauge, a held tool, a hand model that survives weapon switches and overlay clears without a
+custom statusbar.
+
+**Correction (03_MECHS).** My first draft of this entry called it a cockpit frame. It is not —
+**the band is not view-locked.** `PrepareTargeterSprites` pushes into the same `hudsprites`
+array (`hw_weapon.cpp:1072`, `:1076`) and gets the same hand matrix as any other psprite,
+landing on the **main hand**. In VR every non-model psprite layer is transformed by a hand
+matrix, with the hand chosen by the layer's caller (`hw_weapon.cpp:252-258`; HUD models
+likewise at `src/r_data/models.cpp:219-226`), and `psp.x` / `psp.y` become **rotations**, not
+translations (`hw_weapon.cpp:108`). A head-locked cockpit frame is a **WALL**; see
+`03_MECHS.md`, which builds the cockpit from spawned actors instead.
 
 **The trap:** a layer created at or above `PSP_TARGETCENTER` defaults its `Caller` to the
-player's `PowerTargeter` inventory item (`p_pspr.cpp:313-318`). Without that powerup the layer
+player's `PowerTargeter` inventory item (`p_pspr.cpp:310-318`). Without that powerup the layer
 has a null caller and gets culled. Pass `newcaller` explicitly when creating it.
+
+---
+
+## 1a. `A_QuakeEx` is a back door to per-hand haptics — and the camera shake is off by default **(03_MECHS, verified here)**
+
+This is the most valuable thing in this file. Everywhere else the survey says haptics are
+unreachable from ZScript; this is the exception, and it is controllable.
+
+`R_SetViewAngle`'s quake handling routes earthquake intensity straight into the controllers:
+
+```
+src/rendering/r_utility.cpp:1085   if (vr_quake_haptic_level > 0.0) {
+src/rendering/r_utility.cpp:1086       left  = QuakePower(vr_quake_haptic_level, jiggers.Intensity.X, jiggers.Offset.X);
+src/rendering/r_utility.cpp:1087       right = QuakePower(vr_quake_haptic_level, jiggers.Intensity.Y, jiggers.Offset.Y);
+src/rendering/r_utility.cpp:1090       vrmode->Vibrate(10, 0, (float)left);    // left hand
+src/rendering/r_utility.cpp:1091       vrmode->Vibrate(10, 1, (float)right);   // right hand
+```
+
+And the camera motion that would normally come with it is **off by default in VR**:
+`r_quakeintensity` is `0.0f` with the literal comment "Defaulted to 0 for VR"
+(`r_utility.cpp:116`), read as `quakeFactor` at `:1066`.
+
+**What it could become:** `A_QuakeEx` is an ordinary ZScript action function. Put your intensity
+in **X for the left hand and Y for the right**, set a short duration and zero damage radius, and
+you get **independent per-hand rumble with no view shake** — a punch landing in the hand that
+threw it, a parry thump on the shield arm, bow-draw tension, engine rev, a mech's alternating
+footfalls (left stride in X, right in Y).
+
+**Caveats, state them when you use it:** `vr_quake_haptic_level` must be > 0 (it is a user cvar,
+so detect and degrade); `Vibrate` hard-codes a 10 ms pulse at `:1090-1091`, so sustained or
+shaped rumble means re-firing each tic; a user who has raised `r_quakeintensity` **will** get
+camera shake with it; and this is the OpenVR path (`OpenVRHaptics::Vibrate`,
+`gl_openvr.cpp:517-528`), so it inherits the backend question in `00_CAPABILITIES.md` §0.
+
+Label it **HACK / S** — it abuses the earthquake system — but it is a HACK that works today and
+removes the single biggest feel limitation in this survey.
 
 ---
 

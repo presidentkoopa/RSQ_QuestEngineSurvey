@@ -24,6 +24,10 @@ alongside the offhand ones and registered in the VM in the same block:
 | `Actor.AttackRoll` (double) | `actor.zs:270` | `actor.h:1657` | `vmthunks_actors.cpp:2189` |
 | `Actor.AttackAngle` (double) | `actor.zs:271` | `actor.h:1656` | `vmthunks_actors.cpp:2190` |
 | `Actor.OverrideAttackPosDir` (bool) | `actor.zs:276` | `actor.h:1652` | `vmthunks_actors.cpp:2186` |
+| `Actor.AttackDir(actor, angle, pitch)` | `actor.zs:858` | `actor.h:1659` (fn ptr) | — |
+
+`AttackDir` mirrors `OffhandDir` exactly (`actor.zs:858-859`, `actor.h:1659` / `:1667`), so
+each hand has both a position and a direction-from-that-hand helper.
 
 They are written per rendered frame from the real main-hand controller transform, next to
 the offhand writes:
@@ -32,6 +36,9 @@ the offhand writes:
   is taken straight out of `GetWeaponTransform(&mat, VR_MAINHAND)`, i.e. the hand's world
   matrix translation, and `AttackRoll` from `weaponangles[ROLL]`.
 - Offhand, identical shape: `gl_openvr.cpp:2541-2554`.
+- OpenXR backend, same assignments: `src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:586-597`
+  (main hand), `:599-610` (offhand) — **but see §0a, those two blocks read globals that
+  nothing in this tree writes.**
 
 So **both hands are freely readable in world space, with full yaw/pitch/roll each.** The
 "one-readable-hand problem" does not exist at this tag. Every two-handed mechanic below —
@@ -70,23 +77,32 @@ all through `hw_openxrdevice.cpp:593-608`. `HmdPosition[1]` is the up axis.
 
 ## 1. Verdict (3-5 sentences)
 
-A vehicle on this engine must be **the player pawn itself**, not an actor the player rides:
-`PlayerPawn.MovePlayer` and `PlayerPawn.PlayerThink` are plain ZScript virtuals
+**Start with the one line that decides whether anything here works:** `MovePlayer`
+multiplies the player's horizontal velocity by `0.0001` every tic while on the ground unless
+`vr_momentum` or `player.keepmomentum` is set (`player.zs:1374-1379`; `vr_momentum` defaults
+false, `hw_vrmodes.cpp:120`), so a ground vehicle built on player velocity stops dead every
+tic until you re-set `player.keepmomentum = true` each tic — and `A_ChangeVelocity`, the
+obvious way to push a player, silently does nothing unless `vr_recoil` is on, which also
+defaults off (`actions.zs:74-76`, `src/playsim/p_actionfunctions.cpp:90`); write `Actor.Vel`
+directly.
+With that handled, a vehicle on this engine must be **the player pawn itself**, not an actor
+the player rides: `PlayerPawn.MovePlayer` and `PlayerPawn.PlayerThink` are plain ZScript virtuals
 (`wadsrc/static/zscript/actors/player/player.zs:1340`, `:1734`), so a mod can replace the
 entire locomotion model with car physics in about two hundred lines and no engine change —
 whereas riding a separate actor hits two hard walls, an engine that never carries a rider's
 XY velocity and a VR layer that stops updating hand and head poses the moment
 `player.camera` is not a player (`gl_openvr.cpp:2406`, `hw_openxrdevice.cpp:569`).
-Speed is **not** the make-or-break problem it is usually assumed to be: the classic
-`MAXMOVE` 30-units/tic clamp is applied only in water, while crouched, or under the
-wallrun compat flag (`src/playsim/p_mobj.cpp:2096-2105`), the real ceiling is 5000 units
-per tic (`p_mobj.cpp:2107`), and tunnelling is already solved by radius-based substepping
-inside `P_XYMovement` (`p_mobj.cpp:2166-2192`). The genuine make-or-break gotcha is
-QuestZDoom-specific and nastier: `MovePlayer` multiplies the player's horizontal velocity
-by `0.0001` every single tic unless `vr_momentum` or `player.keepmomentum` is set
-(`player.zs:1374-1379`), and `A_ChangeVelocity` silently does nothing to a player unless
-`vr_recoil` is on, which defaults off (`wadsrc/static/zscript/actors/actions.zs:76`,
-`src/playsim/p_actionfunctions.cpp:90`). Two-handed handlebar steering, lean, wheelies,
+Speed is **not** the make-or-break problem it is usually assumed to be, and the widely
+repeated claim that `MAXMOVE` = 30 units/tic is the player's top speed is **false at this
+tag**: that clamp is inside a conditional that only fires in water, while crouched below
+0.75, or under `COMPATF_WALLRUN` (`src/playsim/p_mobj.cpp:2096-2105`), the unconditional
+ceiling is 5000 units/tic (`p_mobj.cpp:2107`), and even the conditional 30 works out to
+about 69 mph — enough for the reference feel either way (§4.7 does the arithmetic from the
+engine's own `vr_vunits_per_meter`). Tunnelling is already solved by radius-based
+substepping inside `P_XYMovement` (`p_mobj.cpp:2166-2192`), and jumps are lossless because
+airborne friction is skipped at default `sv_aircontrol` (`p_mobj.cpp:2447-2463`,
+`g_level.cpp:1928-1931`). Both hands are fully tracked in world space
+(§0), so two-handed handlebar steering, lean, wheelies,
 gear levers, hardpoint guns and per-part damage are all BUILDABLE on top of that; the only
 true WALL in the list is a view-locked cockpit model, because a psprite's VR transform is
 chosen by which hand owns the weapon and there is no head slot (`src/r_data/models.cpp:222`).
@@ -210,6 +226,21 @@ defaults **false** (`src/playsim/p_actionfunctions.cpp:90`). Write `Vel` directl
 No velocities — difference consecutive tics (baseline §1b). Values are written per rendered
 frame, read per tic: fresh, but 35 samples/second.
 
+### Interpolation — the rule for any per-tic model or cockpit move
+`P_Ticker` calls `ClearInterpolation()` on **every** actor on every level at the top of every
+tic, before any thinking happens (`src/p_tick.cpp:151-162`), and `ClearInterpolation` is
+`Prev = Pos(); PrevAngles = Angles;` (`src/playsim/actorinlines.h:29-35`). So `Prev` is
+re-snapshotted each tic and **any position or angle you write during that tic renders
+smoothly between the two tics** — you do not have to do anything to get interpolation.
+
+What breaks it is asking for it to break: `SetOrigin(pos, moving)` calls
+`ClearInterpolation()` again when `moving == false` (`src/playsim/p_maputl.cpp:563-571`),
+which snaps. So **`SetOrigin(pos, true)` interpolates; `SetOrigin(pos, false)` snaps**, and a
+bare `Warp` without `WARPF_INTERPOLATE` (`0x10`, `constants.zs:526`) snaps. For a cockpit,
+handlebar or needle actor driven every tic, pass `true`; call `ClearInterpolation()`
+explicitly only when you genuinely teleport (mount, dismount, respawn), exactly as
+`ActorMover` does at `movingcamera.zs:506`.
+
 ### Model and psprite presentation
 | API | Where |
 |---|---|
@@ -316,10 +347,19 @@ Squeeze a trigger to "grab".
 if (!OverrideAttackPosDir) { fall back to cmd.sidemove; }
 vector3 L = OffhandPos, R = AttackPos;          // actor.zs:272, :268
 vector3 d = R - L;
+d.z *= level.pixelstretch;                      // MANDATORY — see below
 double barAngle = atan2(d.y, d.x);              // wheel/bar yaw
 double barTilt  = atan2(d.z, d.xy.Length());    // bar roll, the motorbike one
 double grip     = d.Length();                   // hands apart = wide bars
 ```
+
+**The vertical axis is compressed and you must undo it.** The hand transform divides the up
+axis by `pixelstretch` and scales it by `1/pixelstretch` again (`gl_openvr.cpp:1288-1290`),
+and `AttackPos.Z` is read straight out of that matrix (`gl_openvr.cpp:2529`). `pixelstretch`
+defaults to **1.2** (`src/gamedata/g_mapinfo.cpp:314`), so a raw vertical hand separation
+reads about **17% short**. It is ZScript-readable as `level.pixelstretch`
+(`wadsrc/static/zscript/doombase.zs:479`, `src/scripting/vmthunks.cpp:2874`). `d.x` and `d.y`
+are unaffected, so `barAngle` is safe; only `barTilt` and `d.Length()` need the correction.
 `barAngle - restAngle` is the steer input; `barTilt` is the lean/roll input. Both hands come
 from the same frame's render, so the difference is coherent. Grab state: `BT_ATTACK` for the
 main hand and `BT_OFFHANDATTACK` for the offhand (`src/d_event.h:42`, `:74`), read from
@@ -328,14 +368,69 @@ main hand and `BT_OFFHANDATTACK` for the offhand (`src/d_event.h:42`, `:74`), re
 **Resolution:** `Angle += steerGain * deadzone(barAngle - restAngle) * speedFactor(speed)`
 inside the overridden `MovePlayer`.
 
-**One-hand fallback (if §0a turns out to bite and the main hand is dead on your backend):**
-use `OffhandPos` against the *player's aim yaw* (`Angle`, which is the weapon hand folded
-into the viewpoint, baseline §1a) as the second point. Worse — you lose roll, and head turns
-pollute it — but it steers.
+**One-hand fallback, only if §0a turns out to bite on your backend:** use `OffhandPos`
+against the player's own aim yaw (`Angle` — the weapon hand is folded into the viewpoint by
+the renderer) as the second point. Strictly worse: you lose bar roll, and head turns pollute
+it. Keep it as a degradation path, not the design.
 
 **Feel knobs:** `restAngle` calibrated on grab (store the hand vector at the tic both grips
 close), dead zone in degrees, gain curve, return-to-centre spring, a per-tic slew limit so a
 35 Hz sample jump cannot snap the bars.
+
+---
+
+#### 4.3a THE TWO-HAND TRAP — read this before writing a line of handlebar code
+
+**Gripping handlebars is the exact gesture that makes the offhand weapon disappear.** This
+is the single most likely thing in this topic to cost a team days, because nothing errors,
+warns or logs — the offhand just stops existing.
+
+`vr_two_handed_weapons` "weapon stabilisation" is **not** gated on `bTwoHanded` or on
+anything a mod controls. On the rising edge of the **offhand grip button**, if the two
+controllers are closer than **0.50 m**, the engine latches `weaponStabilised = true`
+(`src/rendering/gl/stereo3d/gl_openvr.cpp:1716-1727`, distance test at `:1722`). The
+distance is the raw 3D separation of the two controller poses in OpenVR tracking-space
+metres (`gl_openvr.cpp:1709-1714`) — a true physical 50 cm, with no `pixelstretch` involved.
+**`vr_two_handed_weapons` defaults to `true`** (`hw_vrmodes.cpp:119`), so this is on unless
+the player turned it off.
+
+While latched, the offhand weapon goes completely dark:
+- it fires nothing — `PlayerPawn.FireWeapon` returns early for `hand == 1`
+  (`wadsrc/static/zscript/actors/player/player.zs:393-396`);
+- it checks no buttons — `CheckWeaponButtons` returns early (`src/playsim/p_pspr.cpp:755-758`);
+- it renders nothing — both psprite passes `continue` past any layer whose caller is
+  `player->OffhandWeapon` (`src/rendering/hwrenderer/scene/hw_weapon.cpp:832-835`, `:917-920`).
+
+And **script cannot durably clear it**: every psprite state set clears
+`WF_TWOHANDSTABILIZED` and then immediately re-asserts it from the C++ global if
+`weaponStabilised` is still true (`p_pspr.cpp:506-515`). Clearing the flag from ZScript
+survives until the next `SetState` — i.e. not at all.
+
+What *does* clear it: releasing the offhand grip, which sets `weaponStabilised = false`
+unconditionally, with **no distance test on release** (`gl_openvr.cpp:1724-1726`). Note also
+that the whole block only evaluates on a grip-button *edge* (`:1718-1720`), so moving your
+hands apart while still holding grip does **not** release the latch.
+
+**My choice for this topic, and the reasoning: require bars wider than 0.50 m, and do not
+give the vehicle an offhand weapon at all.**
+1. **0.50 m bars are realistic, not a workaround.** Real motorcycle handlebars are 0.65-0.85 m
+   across; a car steering wheel is 0.35-0.38 m diameter, so hands at 9-and-3 are about 0.36 m
+   apart — *inside* the trap. So: **bikes are safe by construction, wheels are not.** For a
+   car, either model an oversized wheel (0.55 m+, which reads fine in VR) or use the next point.
+2. **Drive from hand positions only.** §4.1 steers inside the overridden `MovePlayer` by
+   reading `AttackPos`/`OffhandPos` — which are written by the renderer and are completely
+   unaffected by `weaponStabilised`. Grab state can come from `BT_OFFHANDATTACK` (the
+   *trigger*, not the grip) which also still arrives. **If the vehicle holds no offhand
+   weapon, the latch has nothing to switch off and the trap is inert.** This is the default
+   design for §4.1, §4.3, §4.5 and §4.12.
+3. **Where an offhand weapon is genuinely wanted** — §4.9's hand-aimed turret and §4.10's
+   second gun — detect the condition and tell the player rather than letting it look like a
+   bug: `player.WeaponState & WF_TWOHANDSTABILIZED` is readable from script, so surface it as
+   an on-screen "hands too close" hint. Do not try to clear it (point above).
+
+**Label for the trap itself: WALL, and it is not one a mod can remove.** Missing piece: a
+`bTwoHanded`-style opt-out, or any gate a mod can set, on the condition at
+`gl_openvr.cpp:1717`. Everything in this report is designed to route around it instead.
 
 ### 4.4 Throttle and brake — **BUILDABLE, cost S**
 
@@ -405,13 +500,44 @@ air; level out before you land.
   pitch to the landing surface, and apply a speed penalty or a crash. `LandingSpeed`
   (`actor.zs:267`, default `-8` at `:475`) is the engine's own "that was a landing" threshold.
 
+**Jumps are lossless by default — and there is a trap in making them steerable.**
+`P_XYMovement` skips ground friction entirely while airborne (`p_mobj.cpp:2447-2463`: if
+`Z() > floorz + 2`, not `MF2_ONMOBJ`, not in water, it applies only `Level->airfriction` and
+returns). `airfriction` is 1.0 — i.e. no loss at all — whenever `aircontrol <= 1/256`
+(`src/g_level.cpp:1928-1931`), and `sv_aircontrol` defaults to exactly `0.00390625` = 1/256
+(`src/playsim/p_user.cpp:1072`). So out of the box a jump preserves 100% of horizontal speed.
+
+**The trap:** raising `sv_aircontrol` to get mid-air steering flips `airfriction` to
+`aircontrol * -0.0941 + 1.0004` (`g_level.cpp:1936`), which immediately makes every jump
+lossy. You cannot have both from the cvar. **Override `ApplyAirControl(movefactor, bobfactor)`
+(`player.zs:1325`) in the vehicle pawn instead** — it scales air movement locally without
+touching `Level->aircontrol`, so jumps stay lossless and you still steer.
+
 **Feel knobs:** air pitch rate, landing tolerance window in degrees, speed loss curve,
 `Vel.Z` on launch, per-vehicle `Gravity`, a brief `bNOFRICTION` on a bad landing to make it
 skid (`thingdef_data.cpp:324`).
 
 ### 4.7 Speed limits and tunnelling — **EXISTS (mostly solved), cost S to verify**
 
-This is the section the brief called make-or-break. Quantified:
+This is the section the brief called make-or-break. Quantified — and it quantifies *better*
+than the folklore.
+
+**The conversion, from the engine's own constant.** `vr_vunits_per_meter` defaults to
+**34.0** (`src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:94`), and a tic is 1/35 s.
+So one unit/tic = 34⁻¹ × 35 m/s = **1.03 m/s = 3.71 km/h = 2.30 mph**. Handy sanity check:
+Doom's run speed is about 12.5 u/tic → ~46 km/h, which is the famous "Doomguy runs 50 km/h".
+
+| Speed | u/tic | km/h | mph |
+|---|---|---|---|
+| Doom run | ~12.5 | 46 | 29 |
+| Underwater clamp (`MAXMOVE/4`) | 7.5 | 28 | 17 |
+| `MAXMOVE` *when it applies* | 30 | 111 | **69** |
+| Unconditional `VELOCITY_THRESHOLD` | 5000 | 18,500 | 11,500 |
+
+**So even the pessimistic reading gives a 69 mph bike.** The Matrix-highway / Interstate '76
+reference feel is reachable with room to spare; this topic is not speed-limited.
+
+Quantified clamps:
 
 | Clamp | Value | Where | When it applies |
 |---|---|---|---|
@@ -421,11 +547,38 @@ This is the section the brief called make-or-break. Quantified:
 | `cmd.upmove` | `±0x300` | `player.zs:1579` | fly/swim vertical only |
 | line special thrust | `±MAXMOVE` | `p_lnspec.cpp:1229-1230` | `ThrustThing` without the nolimit arg |
 
-**So a dry, upright, non-wallrun player is clamped at 5000 units/tic, not 30.** For reference,
-Doom running speed is roughly 12.5 units/tic and the player radius is 16 (`player.zs:101`).
-A 200 units/tic vehicle — about 16× running, a credible highway speed — is nowhere near any
-clamp. Note the clamp preserves direction rather than clamping axes independently
-(`p_mobj.cpp:2100-2105`), so it decelerates rather than skewing your heading.
+**So a dry, upright, non-wallrun player is clamped at 5000 units/tic, not 30.** The claim
+that 30 is the player's top speed is a misreading of `p_mobj.cpp:2096`, which is worth
+quoting verbatim because the condition is long enough to skim past:
+
+```c
+if ((mo->player != NULL && (mo->Level->i_compatflags & COMPATF_WALLRUN)) || ((mo->waterlevel >= 1 ||
+    (mo->player != NULL && mo->player->crouchfactor < 0.75)) && !(mo->flags8 & MF8_NOFRICTION)))
+{   // ...clamp to maxmove...
+```
+
+Neither disjunct holds for a dry, upright player at default settings: `compatmode` defaults
+to **0**, which sets `compatflags = 0` (`src/d_main.cpp:621`, `:626-629`, `:694`), so
+`COMPATF_WALLRUN` is off. It is only switched on by compat presets 2, 6, 7 and 9
+(`d_main.cpp:641`, `:667`, `:673`, `:686`).
+
+**But defend against it anyway, because it is not entirely in your hands:**
+- a user running `compatmode 2` (Doom2.exe-strict) or 6/7/9 gets `COMPATF_WALLRUN` and
+  therefore a hard 30 u/tic (69 mph) cap;
+- an individual map can request it by name — `{ "wallrun", COMPATF_WALLRUN, SLOT_COMPAT }`
+  in `src/maploader/compatibility.cpp:152`, or via MAPINFO `compat_wallrun`
+  (`d_main.cpp:701`);
+- and the crouch disjunct fires on its own in VR if the player tucks (§4.5).
+
+Cheap mitigations, in order of preference: keep `player.crouchfactor = 1` while driving;
+set `+NOFRICTION` on the vehicle pawn, which switches off the water *and* crouch disjuncts
+explicitly (`p_mobj.cpp:2093-2097` comment, flag at `thingdef_data.cpp:324`) — though it
+also disables ground friction, so you must model drag yourself; and design the vehicle's top
+speed at or under 30 u/tic so the clamp is never the thing the player feels.
+
+Note the clamp preserves direction rather than clamping axes independently
+(`p_mobj.cpp:2100-2105`), so it decelerates rather than skewing your heading — a capped
+vehicle still handles correctly, it is just slower.
 
 **Tunnelling is already handled.** `P_XYMovement` splits the move into
 `steps = 1 + speed / (radius - 1)` substeps and runs a full `P_TryMove` per substep
@@ -472,8 +625,8 @@ HMD pose. Missing piece: a third `GetWeaponTransform` hand index (or a `VR_HEAD`
 psprite flag selecting it.
 
 **Workaround (HACK, cost M):** spawn a real world actor with the dashboard model,
-`+NOINTERACTION`-style flags, and `SetOrigin(viewPos + forward*d, true)` every tic with
-`ClearInterpolation()` discipline, or parent it to the pawn and let `USEACTORROLL`/
+`+NOINTERACTION`-style flags, and `SetOrigin(viewPos + forward*d, true)` every tic — the
+`true` matters, see the interpolation rule in §3 — or parent it to the pawn and let `USEACTORROLL`/
 `USEACTORPITCH` carry the lean. It will lag the head by one tic (28 ms) because script runs
 at 35 Hz and the head is sampled per frame. For a dashboard that *should* be body-locked
 rather than head-locked — which is what a real cockpit is — that is correct behaviour, not a
@@ -527,6 +680,11 @@ are free to aim and fire independently.
   `BT_ATTACK`; offhand = `player.OffhandWeapon` fired by `BT_OFFHANDATTACK`
   (`d_event.h:74`), each with its own psprite layer and state machine (baseline §2). No work
   needed beyond authoring two weapons.
+- **This is the one design in the report that genuinely needs an offhand weapon, so §4.3a's
+  trap applies in full:** two guns held forward and close together, plus an offhand grip
+  press, silently deletes the left gun. Since the vehicle here steers itself, do **not** use
+  the offhand grip for anything, surface `WF_TWOHANDSTABILIZED` as a visible hint if it
+  latches, and tell the player to hold their hands apart. Same caveat for §4.9's turret.
 
 **Feel knobs:** rail speed curve, how much yaw authority the player keeps, lateral "duck
 left/right" from `HmdPosition.x` as a dodge, auto-brake on a near-miss.
@@ -653,28 +811,64 @@ to request it. Workaround in §4.8.
 `UserCmd` field definition next to `src/playsim/p_user.cpp:1952-1953`.
 Workaround: twist-grip from `AttackRoll` (§4.4), which is arguably better VR anyway.
 
-**Wall 5 — no script-callable haptics.** Baseline §4 holds. The one PC-reachable rumble is
-`VRMode::Vibrate(200, 0/1, 0.4 + 0.6*min(damage,100)/100)` on taking damage
-(`src/playsim/p_interaction.cpp:1441-1444`), outside the `__MOBILE__` guard; everything else
-goes through `VR_HapticEvent` with hardcoded event names and no ZScript binding.
-*HACK:* damage the driver 1 point to get a rumble — but it also adds to `player.damagecount`
-(`p_interaction.cpp:1431`), i.e. a red pain flash, and it must be real damage, so it is
-unusable as continuous road feel. **Build engine feel out of sound and camera shake
-(`DEarthquake`, `src/rendering/r_utility.cpp:1064`), not rumble.**
-*Missing piece:* a ZScript `Vibrate(hand, duration, intensity)` binding onto
-`VRMode::Vibrate` (`hw_vrmodes.h:94`).
+**Wall 5 — haptics work, but only the engine can fire them. This is the highest-value
+engine addition for this topic.** Correcting an earlier, pessimistic reading: rumble is
+genuinely implemented on the OpenVR path. `OpenVRHaptics::Vibrate` has a real body
+(`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`), reached through the `VRMode::Vibrate`
+override (`src/rendering/gl/stereo3d/gl_openvr.h:121-124`), gated on `vr_enable_haptics`
+which defaults **true** (`hw_vrmodes.cpp:125`). What *is* dead is the other path:
+`VR_HapticEvent` is an **empty stub** on PC (`src/QzDoom/qzdoom_common.cpp:65-67`), so every
+one of its call sites — `fire_weapon`, `pickup`, `doorclose`, the damage-type events — does
+nothing here.
+
+So PC rumble comes from exactly one place: the two unconditional `vrmode->Vibrate(200, 0/1,
+0.4 + 0.6*min(damage,100)/100)` calls when the console player takes damage
+(`src/playsim/p_interaction.cpp:1441-1444`, outside the `__MOBILE__` guard).
+
+**Neither entry point is bound to ZScript** (baseline §4: zero haptic/rumble/vibrate hits in
+`wadsrc/static/zscript`). For a driving game that is a real loss, and worth naming plainly:
+**no engine rumble, no road texture, no impact thump, no rev buzz, no tyre-blowout jolt** —
+the entire tactile channel that makes a vehicle feel like a machine is unreachable.
+*HACK, and a poor one:* damage the driver 1 point per thump. It must be real damage, and it
+also adds to `player.damagecount` (`p_interaction.cpp:1431`), i.e. a red pain flash, so it
+is unusable as continuous road feel.
+*Interim:* build engine feel from sound (looping `A_StartSound` with pitch tied to speed)
+and camera shake (`DEarthquake`, `src/rendering/r_utility.cpp:1064`).
+*Missing piece, and the one engine ask I would make first:* a ZScript binding of
+`VRMode::Vibrate(duration, channel, intensity)` (`hw_vrmodes.h:94`) as something like
+`PlayerInfo.Vibrate(int hand, double duration, double intensity)`. It is a thunk onto an
+already-working, already-cvar-gated function — small, additive, default-inert, and it would
+serve every mod in the family, not just a vehicle.
 
 **Wall 6 — 35 Hz is the whole budget for hand motion** (baseline §3). A hand crossing 1 m in
 0.2 s is 7 samples. For steering and levers this is fine (they are positional, not
 gestural). For anything that needs the *path* of a hand — a flicked gear change, a sharp
 bar-slap — you get the endpoints and must infer the middle.
 
-**Wall 7 (not an engine wall, a QuestZDoom booby trap, listed here because it will cost
-someone a day):** `A_ChangeVelocity` returns without doing anything on a player unless
-`vr_recoil` is set, and it defaults false (`wadsrc/static/zscript/actors/actions.zs:74-76`,
-`src/playsim/p_actionfunctions.cpp:90`). Likewise `MovePlayer` annihilates player velocity
-every tic unless `keepmomentum` is re-set (`player.zs:1374-1379`, cvar default false at
-`hw_vrmodes.cpp:120`). Both are silent.
+**Wall 7 — not engine walls, four silent booby traps, listed here because each will cost
+someone a day.** None of them error, warn or log.
+1. `MovePlayer` multiplies `vel.XY` by `0.0001` every tic on the ground unless
+   `vr_momentum` or `player.keepmomentum` is set (`player.zs:1374-1379`; `vr_momentum`
+   defaults false, `hw_vrmodes.cpp:120`). **A ground vehicle built on player velocity stops
+   dead every tic without `player.keepmomentum = true` re-set each tic.** This is the single
+   most important line in this document.
+2. `keepmomentum` self-clears once speed drops under `vr_momentum_threshold`, default 1.0
+   (`player.zs:1385-1388`, `hw_vrmodes.cpp:121`). Set it every tic, not once.
+3. `A_ChangeVelocity` returns without doing anything on a player unless `vr_recoil` is set,
+   and it defaults false (`wadsrc/static/zscript/actors/actions.zs:74-76`,
+   `src/playsim/p_actionfunctions.cpp:90`). Write `Actor.Vel` directly.
+4. `COMPATF_WALLRUN` — off by default (`compatmode 0`, `d_main.cpp:621`) but settable by the
+   user's compat preset or by an individual map (`compatibility.cpp:152`) — silently caps
+   the player at 30 u/tic / 69 mph (`p_mobj.cpp:2096-2105`). So does a VR tuck via
+   `crouchfactor < 0.75`. Mitigations in §4.7.
+5. **Weapon stabilisation makes the offhand weapon vanish** when the offhand grip is pressed
+   with the hands under 0.50 m apart (`gl_openvr.cpp:1716-1727`), default-on
+   (`hw_vrmodes.cpp:119`), not clearable from script (`p_pspr.cpp:506-515`). Gripping
+   handlebars is precisely this gesture. Full treatment and the design response in **§4.3a** —
+   it is the first thing to read in this document if you are building a two-handed control.
+6. `AttackPos.Z` / `OffhandPos.Z` are compressed by `1/pixelstretch`, default 1.2, so
+   vertical hand separation reads ~17% short (`gl_openvr.cpp:1288-1290`, `:2529`,
+   `g_mapinfo.cpp:314`). Multiply by `level.pixelstretch` (§4.3).
 
 ---
 
@@ -704,11 +898,14 @@ prove the collision budget — in one pk3, no engine change, no map work.
 5. **Handlebar grips:** a `+OFFHANDWEAPON` weapon holding the left grip model and an ordinary
    ready weapon holding the right. They track the real hands with zero code
    (`src/r_data/models.cpp:222`).
-6. **The one measurement that decides everything:** log
-   `Vel.Length()`, `player.onground`, and a tic-time sample while driving a long straight at
-   `maxSpeed = 50`, then `100`, then `200` units/tic, against a wall-dense map. You are
-   measuring `TryMove` substep cost (`p_mobj.cpp:2166-2192`), not correctness — the clamp at
-   5000 (`p_mobj.cpp:2107`) will not be approached.
+6. **The one measurement that decides everything:** log `Vel.Length()`, `player.onground`,
+   `player.crouchfactor` and a tic-time sample while driving a long straight on a wall-dense
+   map at `maxSpeed = 30` (69 mph), then `60`, then `120` units/tic. You are measuring
+   `TryMove` substep cost (`p_mobj.cpp:2166-2192`), not correctness. Two things to watch for:
+   `Vel.Length()` pinning at exactly 30 means something switched `COMPATF_WALLRUN` on or the
+   player tucked (§4.7); a tic-time knee tells you where the substep budget runs out.
+   **Pick the shipping top speed under that knee, and aim for ≤30 u/tic so the conditional
+   clamp can never be the thing the player feels.**
 7. **Verify §0a first** (see Open Questions). If `AttackPos == OffhandPos == pawn.pos` on your
    backend, everything hand-driven in this document is inert and you must fall back to
    sticks before writing anything else.
@@ -725,9 +922,10 @@ Steps 1-3 are the whole physics model and are perhaps 120 lines. Steps 4-5 are c
    `AttackPos`, `OffhandPos`, `HmdPosition`, `OverrideAttackPosDir`, `PlayInVR` each tic from
    a trivial EventHandler, run once under SteamVR and once under the OpenXR runtime you
    actually ship on, and compare. **Every hand-driven mechanic in §4 depends on the answer.**
-2. **Does `_BASELINE_FACTS.md` §1a need rewriting for every other topic report, or only this
-   one?** The main-hand fields are real (§0). Other reports built on "one readable hand"
-   should be re-checked.
+2. **Has every other topic report been re-checked against the corrected §1a?** The baseline
+   has been fixed, but any report already written on the "one readable hand" premise will
+   have labelled two-handed mechanics WALL or HACK for a reason that no longer holds. This
+   report is written on two hands throughout.
 3. **What is the real cost of a 200 units/tic player** in substepped `TryMove`s on a dense
    map at Quest-class CPU budget? Unknown; §6 step 6 measures it.
 4. **Does `P_SlideMove` at vehicle speed produce a usable "scrape the barrier" feel, or does

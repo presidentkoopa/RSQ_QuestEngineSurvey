@@ -4,7 +4,33 @@ Engine surveyed: tag `qzd17.3` of `github.com/emawind84/gzdoom` (QuestZDoom PC e
 All citations are repo-relative at that tag. Sprite-layer only: nothing below authors a map,
 a linedef, a sector or a thing. Walls are found at runtime by trace or by block iterator.
 
-Builds on `_BASELINE_FACTS.md` (offhand-only hand pose, no hand velocity, 35 Hz script sampling).
+Builds on `_BASELINE_FACTS.md` as corrected: **both hands are fully tracked** (main hand via
+`Actor.AttackPos/AttackAngle/AttackPitch/AttackRoll`, `wadsrc/static/zscript/actors/actor.zs:268-271`),
+there are still no hand or head *velocity* fields, and script still samples at 35 Hz.
+Surface-normal reconstruction is shared with `05_GRAPPLE_ROPES.md` §3.1 — this report reuses that
+function rather than defining a second one.
+
+---
+
+## 0. Read this first — two traps that decide the whole topic
+
+**Trap 1 — the VR momentum kill deletes your velocity every tic.** `MovePlayer` multiplies
+`vel.XY` by `0.0001` on *every tic the player is on the ground*, unless `vr_momentum` or
+`player.keepmomentum` is set — `wadsrc/static/zscript/actors/player/player.zs:1373-1383`.
+`vr_momentum` defaults **false** (`src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:120`).
+`player.keepmomentum` is writable (`player.zs:3108`, native `src/playsim/d_player.h:414`) and the
+engine itself sets it whenever it wants velocity to survive (`wadsrc/static/zscript/actors/actions.zs:78`).
+**Every slide, dash, backstep and momentum mechanic in this report dies silently without
+`player.keepmomentum = true` re-asserted each tic.** This single line is the difference between
+this topic being BUILDABLE and appearing impossible. The engine clears the flag for you once speed
+drops below `vr_momentum_threshold` (default 1.0) — `player.zs:1385-1387` — which is a convenient
+natural end-of-dash, not something you must undo.
+
+**Trap 2 — `A_ChangeVelocity` on the player is a no-op by default.** The brief named it as an API;
+it is not one. `wadsrc/static/zscript/actors/actions.zs:63-79` short-circuits with
+`if (!vr_recoil) return;` for the player, and `vr_recoil` defaults **false**
+(`src/playsim/p_actionfunctions.cpp:90`). **Write `Actor.Vel` directly** (`actor.zs:112`).
+Any flat-screen movement code ported in will do nothing in a default install and give no error.
 
 ---
 
@@ -12,23 +38,28 @@ Builds on `_BASELINE_FACTS.md` (offhand-only hand pose, no hand velocity, 35 Hz 
 
 The whole player movement loop — `PlayerThink`, `MovePlayer`, `CheckJump`, `CheckCrouch`,
 `CheckMoveUpDown`, `CalcHeight`, `ApplyAirControl` — is **ZScript, virtual, and overridable**
-(`wadsrc/static/zscript/actors/player/player.zs:1734`, `:1340`, `:1514`, `:1194`, `:1565`, `:604`,
-`:1328`), so every mechanic in this brief is script work, not engine work. `LineTrace` returns
-`HitLine` and `LineSide` (`wadsrc/static/zscript/actors/actor.zs:50`, `:59`), and `Line.delta`
-is readable (`wadsrc/static/zscript/mapdata.zs:210`), so **a true 2D wall normal is derivable
-at runtime with no map changes** — that one fact is what makes wall running good rather than
-a fudge. Gravity is per-actor and writable (`Actor.Gravity`, `actor.zs:176`, consumed at
-`src/playsim/actorinlines.h:85-88`), friction is killable per-actor (`bNOFRICTION`,
-`src/scripting/thingdef_data.cpp:324`), and `P_SlideMove` already rewrites `Vel` to the
-wall-parallel component (`src/playsim/p_map.cpp:3328-3329`), so holding a player against a
-wall while keeping tangential speed is close to free. The one engine-specific landmine is
-QuestZDoom's VR momentum kill: `MovePlayer` zeroes XY velocity every tic on the ground unless
-`vr_momentum` or `player.keepmomentum` is set (`player.zs:1374-1383`) — every mechanic here must
-set `player.keepmomentum = true` each tic or it is silently deleted. Comfort is the real
-constraint, not capability: artificial linear acceleration is the nausea source, and the only
-per-eye overlay script can drive is the flat full-screen blend `player.BlendR/G/B/A`
-(`player.zs:3120-3123`, drawn per eye at `src/rendering/hwrenderer/hw_entrypoint.cpp:200-201`),
-so every mechanic gets a blink/fade variant rather than a tunnelling vignette.
+(`player.zs:1734`, `:1340`, `:1514`, `:1194`, `:1565`, `:604`, `:1328`), so every mechanic in this
+brief is script work, not engine work. Past the two traps above, the ceiling is high: `LineTrace`
+returns `HitLine` and `LineSide` (`wadsrc/static/zscript/actors/actor.zs:51`, `:59`) and
+`Line.delta` is readable (`wadsrc/static/zscript/mapdata.zs:212`), so **a true wall normal is
+reconstructible at runtime with no map changes** — that one fact is what makes wall running good
+rather than a fudge. Gravity is per-actor and writable (`Actor.Gravity`, `actor.zs:176`, consumed
+at `src/playsim/actorinlines.h:85-88`), friction is killable per-actor (`bNOFRICTION`,
+`src/scripting/thingdef_data.cpp:324`), airborne friction is already effectively absent at default
+settings (`src/playsim/p_mobj.cpp:2447-2463` with `airfriction == 1`, `src/g_level.cpp:1929-1931`),
+and `P_SlideMove` already rewrites `Vel` to the wall-parallel component
+(`src/playsim/p_map.cpp:3328-3329`), so holding a player against a wall while keeping tangential
+speed is close to free. Comfort is the real constraint, and it is sharply limited by one hard WALL:
+**script cannot change view pitch, roll or yaw in VR** — the HMD overwrites all three after
+`R_SetupFrame` (`src/rendering/hwrenderer/hw_entrypoint.cpp:117` then `:143` →
+`src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:740-741`, `:750`). No dash roll, no
+wall-run camera bank, and equally no accidental nausea from them. Haptics would be the natural
+substitute and are also closed: `VRMode::Vibrate` is a real working implementation
+(`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`) with no ZScript binding (W2). What is left is
+the flat full-screen blend `player.BlendR/G/B/A` (`player.zs:3120-3123`, drawn per eye at
+`hw_entrypoint.cpp:200-201`), camera *position* (which script can still move), sound, and the
+weapon psprite — so every mechanic gets a blink/fade variant rather than a tunnelling vignette,
+and the impact of every mechanic is sold in the sprite layer rather than at the camera.
 
 ---
 
@@ -66,11 +97,16 @@ So the stock VR feel is "no momentum, 8× per-tic speed, instant start/stop". `p
 clears it automatically once speed drops below `vr_momentum_threshold` (default 1.0),
 `player.zs:1385-1387`. That auto-clear is the natural end of a dash or slide.
 
-**Physical crouch is already engine-driven.** With `vr_crouch_use_button` false the OpenXR
-layer writes `player->crouching = 10` and `player->crouchfactor = hmdHeight / defaultViewHeight`
-every frame (`src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:574-579`), and
-`CheckCrouch` honours the `crouching == 10` sentinel (`player.zs:1209-1213`). So a mod that reads
-`player.crouchfactor` gets real physical crouch depth for free in that mode.
+**Physical crouch is already engine-driven — in one of the two modes.** With
+`vr_crouch_use_button` **false** the OpenXR layer writes `player->crouching = 10` and
+`player->crouchfactor = hmdHeight / defaultViewHeight` every frame
+(`src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:574-579`), `CheckCrouch` honours the
+`crouching == 10` sentinel (`player.zs:1209-1213`), and `PlayerPawn.Tick` scales the collision
+volume by it (`Height = FullHeight * player.crouchfactor`, `player.zs:150-153`). So in that mode a
+mod reading `player.crouchfactor` gets real physical crouch depth *and* a real ducked hitbox for
+free. The cvar **defaults to true** (`src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:122`),
+in which case physical crouch is a render-time eye offset only (`hw_openxrdevice.cpp:219`) and
+`crouchfactor` never moves. See §3.5.
 
 **Stick and head translation are separate.** In VR the stick goes through `VR_GetMove`'s
 joystick pair into `cmd.forwardmove` / `cmd.sidemove` (`src/g_game.cpp:834-842`), while
@@ -118,8 +154,15 @@ Per-tic order inside one game tic (`src/p_tick.cpp:165-172`):
 - **Overriding `PlayerPawn.MovePlayer` / `CheckJump` / `ApplyAirControl` / `FallAndSink`** — cleanest
   and most precise, but requires replacing the player class, which collides with any other mod that
   does the same.
-- **`EventHandler.WorldTick`** — fine for detection and bookkeeping; same timing window as
-  `DoEffect` for velocity writes, but not per-player, so key everything on `players[i]` explicitly.
+- **`EventHandler.WorldTick`** (`wadsrc/static/zscript/events.zs:177`, ordering
+  `src/p_tick.cpp:166-172`) — **the established injection point across this survey.** It runs after
+  all player input processing and before `P_XYMovement` / `P_ZMovement`
+  (`src/playsim/p_mobj.cpp:4344`, `:4372`), so writes to `Vel`, `bFly`, `bNoGravity` and `Gravity`
+  land the same tic. Not per-player, so key everything on `players[i]` explicitly — and on the
+  owner, per the netplay rule.
+- **`PlayerPawn.TickPSprites()`** (called `player.zs:1796`) — the other clean hook, and the right
+  one if the mechanic's visible component lives on the weapon psprite (which, given W7, is where
+  most of the "feel" for these mechanics has to go).
 
 ### 3.2 Moving the player
 
@@ -127,11 +170,19 @@ Per-tic order inside one game tic (`src/p_tick.cpp:165-172`):
 |---|---|---|
 | `Actor.Vel` (vector3, writable) | `actor.zs:112` | The one reliable mover. Write it, then set `player.keepmomentum = true`. |
 | `Actor.Thrust(speed, angle)` | `actor.zs:860` | **Adds `ThrustAngleOffset`** (`src/playsim/actor.h:1607-1613`), which the OpenVR layer sets from the offhand controller when `vr_move_use_offhand` (`src/rendering/gl/stereo3d/gl_openvr.cpp:2603-2606`) and which is **not exposed to ZScript** (no `DEFINE_FIELD`). So `Thrust` has an unreadable direction bias in VR. Do not use it for a directional dash. |
-| `A_ChangeVelocity` | `wadsrc/static/zscript/actors/actions.zs:63` | **Trap: `if (!vr_recoil) return;` on the player** (`actions.zs:77`), and `vr_recoil` defaults false (`src/playsim/p_actionfunctions.cpp:90`). Unusable as a mover. It does show the correct idiom: it sets `player.keepmomentum = true` (`actions.zs:78`). |
+| `A_ChangeVelocity` | `wadsrc/static/zscript/actors/actions.zs:63-79` | **Trap 2 (§0). Unusable as a mover on the player.** It does show the correct idiom: it sets `player.keepmomentum = true` (`actions.zs:78`). |
 | `Actor.TryMove(newpos, dropoff, missilecheck, tm)` | `actor.zs:831` | Collision-checked relocation; use for blink/teleport comfort variants. |
 | `Actor.CheckMove(newpos, flags, tm)` | `actor.zs:832`, flags `PCM_DROPOFF/NOACTORS/NOLINES` at `constants.zs:545-547` | Probe a position without moving — ledge and clearance tests. |
 | `Actor.SetOrigin(newpos, moving)` | `actor.zs:753` | Unchecked relocation. Only after a `CheckMove`. |
 | `Actor.Vel3DFromAngle` | `src/playsim/actor.h:1620` (native) | |
+
+**The hard speed cap: `MAXMOVE = 30` map units per tic** — `src/playsim/p_local.h:61`, applied in
+`P_XYMovement` at `src/playsim/p_mobj.cpp:2065-2066` (quartered to 7.5 in water unless deeply
+crouched). That is the ceiling on every dash, slide and wall run here: ~1050 units/sec, about 31
+m/s at `vr_vunits_per_meter = 34` (`hw_vrmodes.cpp:94`). Writing a larger `Vel` does not produce a
+larger move; it is clipped. Tune dash speeds against 30, not against a number that feels big.
+Separately, `P_XYMovement` substeps any move larger than `radius - 1` (`p_mobj.cpp:2166-2180`) so
+fast movement does not tunnel through lines — you do not need to substep yourself.
 
 ### 3.3 Gravity and friction — what a mod may change, and what is baked in
 
@@ -181,21 +232,27 @@ thunk `src/scripting/vmthunks_actors.cpp:1272`.
 - `HitSector`, `Hit3DFloor`, `HitTexture` (`actor.zs:52-54`)
 - `SectorPlane` — 0 floor / 1 ceiling (`actor.zs:60`)
 
-**It does not hand you a normal. You derive one, exactly, and this is cheap:**
+**It does not hand you a normal, and `HitDir` is not one** — it is the trace's own direction vector
+(`src/playsim/p_map.cpp:5305`), so it points *into* the wall. **Use the reconstruction function
+already written up in `05_GRAPPLE_ROPES.md` §3.1 rather than writing a second one**; it covers
+floors and ceilings (`SecPlane.Normal`, `wadsrc/static/zscript/mapdata.zs:265`, via
+`Sector.floorplane`/`.ceilingplane`, `mapdata.zs:404-405` — slope-correct) as well as walls.
 
-`Line` exposes `v1`, `v2`, `delta` (`wadsrc/static/zscript/mapdata.zs:210-211`). The engine's own
-side test is `P_PointOnLineSidePrecise`: `(p.y - v1.y)*delta.x + (v1.x - p.x)*delta.y > eps` → back
+The wall branch, which is the one this topic needs, is derived as follows. `Line` exposes `v1`,
+`v2` (`mapdata.zs:211`) and `delta` (`mapdata.zs:212`). The engine's own side test is
+`P_PointOnLineSidePrecise`: `(p.y - v1.y)*delta.x + (v1.x - p.x)*delta.y > eps` → back
 (`src/playsim/p_maputl.h:42-45`). Front side is therefore the half-plane in direction
-`(delta.y, -delta.x)`. So:
+`(delta.y, -delta.x)`, and `Line.ESide { front=0, back=1 }` is `mapdata.zs:167-170`:
 
 ```
-Vector2 d = data.HitLine.delta;
-Vector2 n = (d.y, -d.x).Unit();      // outward normal of the FRONT side
+Vector2 d = data.HitLine.delta.Unit();
+Vector2 n = (d.y, -d.x);                  // outward normal of the FRONT side
 if (data.LineSide == Line.back) n = -n;   // n now points back toward the tracer
 ```
 
-That is a surveyed-geometry-exact 2D wall normal, derived entirely at runtime. It is 2D only —
-Doom walls are vertical, so there is no vertical component to recover and none is needed.
+That is a geometry-exact wall normal, derived entirely at runtime. Doom walls are always vertical,
+so there is no vertical component to recover and none is needed. Verify the sign empirically once
+(§6 step 5) before trusting the polarity in shipped tuning.
 
 **Richer alternative:** `LineTracer` (`wadsrc/static/zscript/doombase.zs:306-321`) with an overridable
 `TraceCallback()` and a `TraceResults` struct carrying `Side`, `Tier`, `HitLine`, `HitPos`,
@@ -224,14 +281,47 @@ player to each candidate line yourself; keep the nearest one whose normal oppose
 | Input | How | Reliability |
 |---|---|---|
 | **Button** | `player.cmd.buttons & BT_*` (`constants.zs:834-869`) with `player.oldbuttons` (`player.zs:3064`) for edges. `BT_USER1..4` (`:859-862`) are free; `BT_JUMP`, `BT_CROUCH`, `BT_RUN`, `BT_OFFHANDATTACK` (`:866`) are in use. | **Highest.** No false positives, no 35 Hz loss. Default every mechanic to a button. |
-| **Stick flick** | `cmd.forwardmove` / `cmd.sidemove` — pure stick in VR (`src/g_game.cpp:834-842`), clamped to `MAXPLMOVE` (`:863-870`). Detect a double-tap: value crosses zero then exceeds ~80% of max within ~8 tics. | **Good.** Clean signal, but a double-tap costs you ~0.2 s of latency, and players who ride the stick at full deflection will mis-fire it. Make the threshold and window cvars. |
-| **Physical crouch** | `player.crouchfactor` (`player.zs:3127`) when `vr_crouch_use_button` is false — the engine writes it from head height each frame (`hw_openxrdevice.cpp:574-579`). Or read `HmdPosition.y` directly (metres; `src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:445`, raw tracking-space pose from `VR_SetHMDPosition`, `src/QzDoom/qzdoom_common.cpp:93-95`, fed from the raw HMD matrix at `src/rendering/gl/stereo3d/gl_openvr.cpp:2400`). | **Good for a held state, poor as a trigger.** Depth is reliable; *rate* of crouch is 2-3 samples at 35 Hz (§3 of BASELINE). Use "below X% of standing height" as a gate, never "crouched fast" as a trigger. |
-| **Lean** | Differencing `HmdPosition.xz` across tics, in metres. | **Weakest, and it fights the engine.** Head translation is already converted to movement every frame by the renderer's own `P_XYMovement` call (`hw_openxrdevice.cpp:665-688`), so a lean *already* moves the player; a lean gesture is therefore read against a moving baseline. Also: standing-height and play-space origin vary per player, and nothing recentres `HmdPosition` for you. Use lean only as a **modifier on an already-committed mechanic** (which way you leave a wall run), never as the trigger. |
-| **Offhand motion** | `OffhandPos` differenced per tic (BASELINE §1b — no velocity field). | Usable, 2-4 samples per gesture. Competes with weapon handling. Not recommended for locomotion. |
+| **Stick flick** | `cmd.forwardmove` / `cmd.sidemove` — pure stick in VR (`src/g_game.cpp:834-842`), clamped to `MAXPLMOVE` (`:863-870`). Detect a double-tap: value crosses zero then exceeds ~80% of max within ~8 tics. | **Good — with one hard exception.** `vr_teleport` **hard-zeroes `side` and `forward`** (`src/g_game.cpp:844-847`), so every stick-flick mechanic is dead for players using comfort teleport locomotion. Detect that cvar and fall back to buttons, or the mechanic silently vanishes for exactly the players most likely to have it on. Otherwise clean, but a double-tap costs ~0.2 s of latency and players who ride the stick at full deflection will mis-fire it. Make threshold and window cvars. |
+| **Physical crouch** | `player.crouchfactor` (`player.zs:3126`) when `vr_crouch_use_button` is false — the engine writes it from head height each frame (`hw_openxrdevice.cpp:574-579`). Or read `HmdPosition.y` directly (metres; `src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:445`, raw tracking-space pose from `VR_SetHMDPosition`, `src/QzDoom/qzdoom_common.cpp:93-95`, fed from the raw HMD matrix at `src/rendering/gl/stereo3d/gl_openvr.cpp:2400`). | **Good for a held state, poor as a trigger.** Depth is reliable; *rate* of crouch is 2-3 samples at 35 Hz (BASELINE §3). Use "below X% of standing height" as a gate, never "crouched fast" as a trigger. See the collision caveat immediately below — it changes which mode you must ask the player to run. |
+| **Lean** | Differencing `HmdPosition.xz` across tics, in metres. | **Weakest, and it fights the engine.** Head translation is already converted to movement every frame by the renderer's own `P_XYMovement` call (`hw_openxrdevice.cpp:665-688`), so a lean *already* moves the player; a lean gesture is read against a moving baseline. Standing height and play-space origin also vary per player, and nothing recentres `HmdPosition` for you. Use lean only as a **modifier on an already-committed mechanic** (which way you leave a wall run), never as the trigger. |
+| **Main hand pose** | `AttackPos` / `AttackAngle` / `AttackPitch` / `AttackRoll`, `native readonly` at `wadsrc/static/zscript/actors/actor.zs:268-271`, thunks `src/scripting/vmthunks_actors.cpp:2187-2190`, natives `src/playsim/actor.h:1654-1657`. Filled from the real controller transform at `hw_openxrdevice.cpp:586-597` (OpenVR `gl_openvr.cpp:2525-2537`). Gate on `OverrideAttackPosDir` (`actor.zs:276`, set `hw_vrmodes.cpp:438`). | Both hands are fully tracked; BASELINE §1a has been corrected. For *locomotion* this changes little — the weapon hand is busy — but it means a two-hand gesture is available if a mechanic ever wants one. No velocity field either way (BASELINE §1b): difference positions yourself. |
+| **Offhand motion** | `OffhandPos` differenced per tic. | Usable, 2-4 samples per gesture. Competes with weapon handling. Not recommended for locomotion. |
 
-Calibration note: `HmdPosition` is raw tracking-space metres. A mod that wants "is the player
-crouching" must learn the standing height itself (running max over the first few seconds, or a
-cvar) — the engine's own code does exactly this hack (`hw_openxrdevice.cpp:157-171`).
+**Collision caveat for every physical-body mechanic — room-scale is XY-only.** The renderer's
+positional-movement block moves the player in XY and then explicitly restores Z
+(`src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:674-686`, OpenVR
+`src/rendering/gl/stereo3d/gl_openvr.cpp:2618-2632`). Head *height* reaches the game only as a
+render-time eye offset (`hw_openxrdevice.cpp:219`) and, in physical-crouch mode, through
+`crouchfactor`. Those are different things:
+
+- **`vr_crouch_use_button` true (the default, `hw_vrmodes.cpp:122`)** — physically ducking changes
+  the eye offset and nothing else. `crouchfactor` stays 1, so the collision volume does **not**
+  duck. Physical crouch is view-only, and a slide keyed on it will never fire.
+- **`vr_crouch_use_button` false** — the engine writes `crouchfactor` from head height every frame
+  (`hw_openxrdevice.cpp:574-579`), and `PlayerPawn.Tick` sets `Height = FullHeight * crouchfactor`
+  every tic (`player.zs:150-153`). **In this mode the collision volume does follow the head**,
+  subject to `CanCrouch()` and `level.IsCrouchingAllowed()`.
+
+So: `HmdPosition` makes lean and duck *detection* work in both modes, but a mechanic whose
+resolution depends on a shorter player (sliding under something) requires
+`vr_crouch_use_button 0`. State that requirement in the mod's options rather than assuming it.
+
+**Calibration and units — get this wrong and every duck and lean threshold is wrong.**
+
+- `HmdPosition` is **raw tracking-space metres**, not map units and not an offset from anything.
+  A mod that wants "is the player crouching" must learn the standing height itself (running max
+  over the first few seconds, or a cvar) — the engine's own code does exactly this hack
+  (`hw_openxrdevice.cpp:157-171`).
+- To convert to map units, horizontal is `× vr_vunits_per_meter` (**34**,
+  `src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:94`), but **vertical additionally divides by
+  `level.pixelstretch`** (default 1.2) — see `getHmdAdjustedHeightInMapUnit`,
+  `hw_openxrdevice.cpp:151-155`, and the weapon transform at `gl_openvr.cpp:1282-1292`.
+  `pixelstretch` is readable from ZScript (`wadsrc/static/zscript/doombase.zs:479`).
+  **Forget the divide and vertical head movement reads ~17% short**, so a duck threshold tuned in
+  map units fires late or not at all. Horizontal lean is unaffected.
+- `vr_height_adjust` is applied downstream at the use sites (`hw_openxrdevice.cpp:154`), **not** at
+  the source, so `HmdPosition` as script sees it does *not* include it. Add it yourself if you are
+  comparing against anything the engine computed.
 
 ### 3.6 Feedback channels available to script
 
@@ -246,12 +336,16 @@ cvar) — the engine's own code does exactly this hack (`hw_openxrdevice.cpp:157
   real hazard.
 - **View offset** — `Actor.SetViewPos(offset, flags)` (`actor.zs:1278`, flags `VPSF_*` at
   `constants.zs:431-434`), applied at `src/rendering/r_utility.cpp:648-673` before `CenterEyePos`
-  is taken. Lets you shove the VR camera laterally. Comfort-hostile; off by default.
-- **View roll** — `A_SetViewRoll` (`actor.zs:1277`) → `viewPoint.Angles.Roll` →
-  `HWAngles.Roll` (`r_utility.cpp:1230`) → used by the VR eye pose
-  (`src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:205-206`). **Artificial roll does
-  reach the headset.** Default it off for every mechanic.
-- **Haptics** — per BASELINE §4, not reachable from ZScript. Treat as unavailable.
+  is taken (`:1236`). The VR layer never rewrites `vp.Pos` — `updateHmdPose` touches only angles
+  (`hw_openxrdevice.cpp:740-750`) — so **camera *position* offsets from script do reach the
+  headset.** Comfort-hostile; off by default.
+- **View angles — NOT available in VR. See W7.** `A_SetViewAngle` / `A_SetViewPitch` /
+  `A_SetViewRoll` (`actor.zs:1275-1277`) are overwritten by the HMD pose. No dash roll, no
+  wall-run bank. This is a constraint *and* a safety net: the most common VR-comfort mistake is
+  not available to make.
+- **Haptics** — a working implementation exists on the OpenVR path but has **no ZScript binding**
+  (W2). Treat as unavailable, and note that with W7 also closed, sound and the weapon psprite are
+  the *only* remaining channels for selling impact.
 - **No eye-space vignette.** Script 2D drawing in VR is composited as a world-locked quad at
   `vr_hud_distance`/`vr_hud_scale` (`hw_openxrdevice.cpp:299-301`), not as an eye overlay, so a
   tunnelling ring drawn in `RenderOverlay` would appear as a floating billboard. See §5.
@@ -309,10 +403,14 @@ ramp velocity over 3-4 tics rather than stepping it, because the step is the nau
 and on an `airDashesUsed` counter that resets on landing.
 
 **How it resolves.** Write `Vel.XY` directly as in 4.1. Additionally set `Vel.Z = 0` at the moment of
-the dash to give it a clean horizontal read, then restore gravity. Air friction is the thing to watch:
-if `level.aircontrol > 1/256` the engine multiplies XY by `airfriction` every tic
-(`src/playsim/p_mobj.cpp:2451-2465`), which will bleed the dash. `bNOFRICTION` skips that path
-entirely (`p_mobj.cpp:2442`), which is the clean fix and needs no global cvar write.
+the dash to give it a clean horizontal read, then restore gravity. **Air behaves better than you
+would expect:** `P_XYMovement` takes an early return for airborne actors that skips all ground
+friction and the stop-speed clamp (`src/playsim/p_mobj.cpp:2447-2463`), and the only thing applied
+on that path is `airfriction` — which is exactly `1.0` at the default `sv_aircontrol` of 1/256
+(`src/g_level.cpp:1929-1931`, cvar `src/playsim/p_user.cpp:1072`). So an airborne dash is lossless
+by default and needs no `bNOFRICTION` at all. Set `bNOFRICTION` only if the mod (or a map, via the
+MAPINFO `aircontrol` key, `src/g_level.cpp:1849-1858`) raises `aircontrol`; a map that does will
+otherwise bleed your dash and nothing else will.
 
 **Feel tuning knobs.** Air dash count per jump, whether `Vel.Z` is zeroed, hang-time (set
 `Gravity = 0.2` for the dash's duration via `actor.zs:176`), horizontal speed relative to the
@@ -333,7 +431,7 @@ here some players will simply not tolerate.
 **What the player does.** Crouches — physically, if `vr_crouch_use_button` is false, or on the
 crouch button — while moving at speed.
 
-**How script detects it.** In `DoEffect`: `player.crouchfactor < 0.7` (`player.zs:3127`; in physical
+**How script detects it.** In `DoEffect`: `player.crouchfactor < 0.7` (`player.zs:3126`, and only when `vr_crouch_use_button` is 0 — §3.5; in physical
 crouch mode the engine writes it from head height every frame,
 `hw_openxrdevice.cpp:574-579`) **and** `Vel.XY.Length() > slideEntrySpeed` **and**
 `player.onground`. Physical crouch is the better input here precisely because it is a *held state*,
@@ -439,12 +537,13 @@ tolerate a tic or two of lost contact.
 **Comfort variant.** This is the mechanic most likely to make people ill, because it is sustained
 and lateral. Comfort wall run =
 
-- **No camera roll.** The cinematic instinct is `A_SetViewRoll` (`actor.zs:1277`) to bank into the
-  wall; it reaches the headset (`r_utility.cpp:1230` → `hw_openxrdevice.cpp:205-206`) and it is a
-  reliable way to make someone take the headset off. Default 0, expose as a slider that starts at 0.
-- **No `SetViewPos` lateral shove** (`actor.zs:1278`).
+- **Camera bank is not on the table at all** (W7) — `A_SetViewRoll` does not reach the headset.
+  The cinematic instinct to roll into the wall is simply unavailable, which here is a mercy. Sell
+  the wall contact on the weapon psprite and on sound instead.
+- **No `SetViewPos` lateral shove** (`actor.zs:1278`) — this one *does* reach the headset
+  (§3.6) and would be the same mistake by another route.
 - **Constant tangential speed, not accelerating.** Steady optical flow is tolerable; changing flow
-  is not.
+  is not. Cap it well under `MAXMOVE = 30` (§3.2).
 - **Hard duration cap** (2 s default) so the exposure is bounded.
 - **Partial blend dim** at `BlendA ≈ 0.3` for the duration (`player.zs:3123`) to damp peripheral
   flow — the nearest thing to a vignette this engine gives script (§5).
@@ -499,8 +598,10 @@ at all, make it a weapon-psprite dip, not a camera dip.
 | Backstep | BUILDABLE | S | Button | Blink |
 | Wall run | BUILDABLE | L | Auto-detect + stick | Wall *hang*, no roll |
 | Double jump | BUILDABLE | S | Button | Capped apex, no landing kick |
-| Eye-space comfort vignette | **WALL** | — | — | — (see §5) |
-| Script-driven haptic feedback | **WALL** | — | — | — (BASELINE §4) |
+| Eye-space comfort vignette | **WALL** | — | — | — (W1) |
+| Script-driven haptic feedback | **WALL** | — | — | — (W2) |
+| Camera roll / pitch for feel | **WALL** | — | — | — (W7) |
+| Offhand-grip / two-hand-brace gesture as a trigger | **WALL** | — | — | — (W9) |
 
 ---
 
@@ -520,18 +621,34 @@ strength — e.g. a `vr_vignette`-style uniform applied in `screen->PostProcessS
 (`src/rendering/hwrenderer/hw_entrypoint.cpp:198`) and a `PlayerInfo` field to drive it.
 Until then, the comfort fallback is uniform dimming via `BlendA`, which costs the whole image.
 
-**W2 — No haptics from script.** Per BASELINE §4, confirmed here: `VR_HapticEvent` is called only
-from hardcoded native sites (e.g. `src/playsim/p_user.cpp:1301-1304` for heal/heartbeat) and has
-no ZScript thunk. A dash, a wall-grab and a landing therefore have no tactile confirmation, which
-in VR is a real loss — haptic onset is one of the cheapest ways to make a locomotion mechanic
-*feel* grounded. **Exact missing piece:** a ZScript-callable `PlayerInfo.Vibrate(hand, duration, intensity)`
-thunking to `VRMode::Vibrate` (`src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`).
+**W2 — Haptics exist and work, but script cannot reach them. This is the sharpest wall in the
+report, because W7 took away the obvious alternative.** The picture is more precise than
+BASELINE §4 implied, and the distinction matters:
 
-**W3 — `A_ChangeVelocity` is dead on the player.** `actions.zs:77` short-circuits on `!vr_recoil`,
-and `vr_recoil` defaults false (`src/playsim/p_actionfunctions.cpp:90`). Any mod code (or borrowed
+- **`VRMode::Vibrate(duration, channel, intensity)` is a real, working implementation** on the
+  OpenVR path — `OpenVRMode::Vibrate` (`src/rendering/gl/stereo3d/gl_openvr.h:121-124`) forwards to
+  `OpenVRHaptics::Vibrate` (`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`), which queues
+  per-channel duration and intensity for `ProcessHaptics` to play, gated on `vr_enable_haptics`
+  (`src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:125`). Declared on the base class at
+  `src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`.
+- **`VR_HapticEvent` is an empty stub** on this build — `src/QzDoom/qzdoom_common.cpp:65-67` has no
+  body. So the named-event calls scattered through the playsim (e.g. `src/playsim/p_user.cpp:1301-1304`
+  for heal/heartbeat) do nothing here, and provoking one is not even a HACK route.
+- **Neither is bound to ZScript.** No thunk for either.
+
+So a dash, a wall-grab and a landing have **no tactile confirmation available to a mod at all**.
+Combined with W7 (no camera pitch or roll), the two channels a VR movement mechanic would normally
+use to sell impact are both closed, and the mod is left with sound and the weapon psprite.
+**Exact missing piece:** a ZScript-callable `PlayerInfo.Vibrate(hand, duration, intensity)` thunking
+to `VRMode::Vibrate`. Note what that is and is not — **a binding over an existing, working
+implementation, not a new feature.** One thunk, additive, no behaviour change for existing callers,
+and by far the highest feel-per-line change available to this topic. OpenXR parity needs checking
+separately before anyone commits to it.
+
+**W3 — `A_ChangeVelocity` is dead on the player.** Trap 2 of §0. `actions.zs:63-79` short-circuits
+on `!vr_recoil`, default false (`src/playsim/p_actionfunctions.cpp:90`). Any mod code (or borrowed
 mod code) that moves the player with `A_ChangeVelocity` silently does nothing in a default install.
-Not a blocker — write `Vel` directly — but it will bite anyone porting a flat-screen movement mod,
-and it is worth stating loudly.
+Not a blocker — write `Vel` directly — but it will bite anyone porting a flat-screen movement mod.
 
 **W4 — `Thrust` has an unreadable direction bias.** `AActor::Thrust` adds `ThrustAngleOffset`
 (`src/playsim/actor.h:1607-1613`), which the OpenVR path sets from the offhand controller when
@@ -551,6 +668,43 @@ at `src/g_level.cpp:1849-1858`).
 and per-player, which covers it — but two mods that both write `Gravity` on the same player will
 fight, and the last writer wins with no arbitration. Not an engine defect; a coordination hazard
 worth stating because this engine family is explicitly shared ground.
+
+**W7 — Script cannot change view pitch, roll or yaw in VR.** `R_SetupFrame`
+(`src/rendering/hwrenderer/hw_entrypoint.cpp:117`) computes `viewPoint.Angles` including any
+`A_SetViewAngle` / `A_SetViewPitch` / `A_SetViewRoll` offsets (`actor.zs:1275-1277`, applied
+`src/rendering/r_utility.cpp:676-690`) — and then `vrmode->SetUp()` at `hw_entrypoint.cpp:143`
+calls `updateHmdPose`, which overwrites `vp.HWAngles.Pitch` and `vp.HWAngles.Roll` from the raw
+HMD (`src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:740-741`) and `vp.Angles.Yaw` from
+the accumulated HMD yaw (`:750`); OpenVR does the same (`src/rendering/gl/stereo3d/gl_openvr.cpp:1467`,
+`:1471`), and the view matrix is built from `HWAngles` downstream
+(`src/rendering/hwrenderer/scene/hw_drawinfo.cpp:443`). This is correct behaviour — the headset
+must own the head — but it means **no camera tilt on a wall run, no roll on a dash, no recoil
+pitch kick.** Camera *position* is unaffected (§3.6), so viewheight and `SetViewPos` still work.
+**What replaces it:** weapon-psprite motion (which is in the sprite layer and fully scriptable),
+sound, the `BlendA` dim, and — for wall run specifically — the `HmdPosition` lean read, letting
+the player's own head do the banking. Found by the flight survey (`04_FLIGHT_6DOF.md`) and
+confirmed here.
+
+**W8 — Room-scale Z is discarded.** Positional tracking is applied in XY only and Z is explicitly
+restored (`hw_openxrdevice.cpp:674-686`, `gl_openvr.cpp:2618-2632`). A mechanic cannot read
+"player physically jumped" or "player physically ducked" as a change in the collision volume —
+only as `HmdPosition.y` (detection still works) and, when `vr_crouch_use_button` is 0, as
+`crouchfactor` driving `Height` (`player.zs:150-153`). See §3.5 for which mode gives what.
+**Exact missing piece:** a vertical component in the positional-movement block, or a
+ZScript-writable per-player height offset that the collision code honours.
+
+**W9 — Do not build a gesture on the offhand grip or on an offhand-weapon gadget.** With
+`vr_two_handed_weapons` on (default true, `hw_vrmodes.cpp:119`), pressing the **offhand grip**
+with the hands closer than 0.50 m sets `weaponStabilised`
+(`src/rendering/gl/stereo3d/gl_openvr.cpp:1716-1727`) — and this is **not** gated on the weapon's
+`bTwoHanded` flag, so it fires for any weapon. The offhand weapon then goes completely dark:
+it fires nothing (`player.zs:393-396`), checks no buttons (`src/playsim/p_pspr.cpp:512-515`),
+and renders nothing, with `WF_TWOHANDSTABILIZED` re-asserted on every state set
+(`p_pspr.cpp:755-757`). Mostly peripheral to locomotion — none of the six designs above need it —
+but it rules out two tempting input routes: **a two-handed brace pose as a dash trigger**, and
+**an offhand-weapon "gadget" (grapple, booster) that fires a movement mechanic**. Either will
+silently stop working whenever the player brings their hands together, which is exactly when a
+brace gesture is being made. Use `BT_USER1..4` instead.
 
 ---
 
@@ -615,4 +769,15 @@ fades. Those are polish on a mechanic that is not yet proven, and each is an ind
 6. **Netplay.** `level.gravity` / `aircontrol` / `airfriction` are level-global
    (`doombase.zs:454-456`) and shared by every player. Per-player `Actor.Gravity` is the net-safe
    lever. I did not audit prediction (`CF_PREDICTING`, e.g. `player.zs:1442`) against velocity
-   written in `DoEffect`; a dash may mispredict. Worth a pass before any of this ships multiplayer.
+   written in `DoEffect` or `WorldTick`; a dash may mispredict. Worth a pass before any of this
+   ships multiplayer.
+7. **Will the owner run `vr_crouch_use_button 0`?** The slide design (4.3) and any
+   duck-under-geometry mechanic need it, because that cvar decides whether the collision volume
+   follows the head at all (§3.5, W8). It defaults to **true**, i.e. off for our purposes. This is
+   a product decision — if the answer is no, 4.3 must be re-keyed onto a button and loses its best
+   input.
+8. **Given W7, how much of the "feel" can the weapon psprite actually carry?** Every mechanic here
+   loses its camera-motion channel. The psprite is the replacement, but I have not surveyed how far
+   a psprite can be pushed in VR, where it is a tracked 3D model rather than a 2D overlay. If the
+   answer is "not far", the mechanics will land flatter than the designs above imply, and the
+   comfort story becomes "there is nothing to turn off" rather than "we tuned it down".

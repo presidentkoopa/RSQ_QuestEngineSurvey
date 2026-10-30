@@ -2,21 +2,23 @@
 
 **Engine:** tag `qzd17.3` of `github.com/emawind84/gzdoom`. All paths repo-relative at that tag.
 **Scope:** what a *mod* (ZScript + MODELDEF, no engine edit) can build.
-**Reads against:** `_BASELINE_FACTS.md`. **This report corrects baseline §1a — see §2.0.**
+**Reads against:** `_BASELINE_FACTS.md` (as corrected: both hands are fully tracked).
+This report was written on the two-hand premise throughout; §2.0 is the independent
+verification of that correction, with the native-side citations.
 
 ---
 
 ## 1. Verdict
 
-A real VR bow is **BUILDABLE on this engine, cost M**, and it is buildable for a better reason
-than the baseline suggests: the main hand's pose *is* readable from ZScript as
-`Actor.AttackPos` / `AttackAngle` / `AttackPitch` / `AttackRoll`
-(`wadsrc/static/zscript/actors/actor.zs:268-271`, thunked at
-`src/scripting/vmthunks_actors.cpp:2187-2190`). Both hands are therefore available in the
-**same world coordinate space**, so draw length is a straight vector subtraction
-`AttackPos - OffhandPos` — not an inference. Everything downstream of that (draw power, arc,
-release, the pump/rack/crank strokes, throw velocity, holster grabs) follows from differencing
-that pair plus a per-tic position history in `Inventory.DoEffect()`.
+A real VR bow is **BUILDABLE on this engine, cost M**. Both hands are fully tracked and live in
+the **same world coordinate space**: the main hand as `Actor.AttackPos` / `AttackAngle` /
+`AttackPitch` / `AttackRoll` (`wadsrc/static/zscript/actors/actor.zs:268-271`, thunked at
+`src/scripting/vmthunks_actors.cpp:2187-2190`, native `src/playsim/actor.h:1654-1657`), the
+offhand as `OffhandPos` and friends. Draw length is therefore a straight vector subtraction
+`AttackPos - OffhandPos` — a genuine measurement, not an inference. Everything downstream
+(draw power, arc, release, the pump/rack/crank strokes, throw velocity, holster grabs) follows
+from differencing that pair plus a per-tic position history in `Inventory.DoEffect()`. Nothing
+in this report is labelled WALL or HACK for want of a second hand.
 
 The offhand *weapon* system (`PlayerInfo.OffhandWeapon`, `PSP_OFFHANDWEAPON`, per-hand
 `WF_OFFHAND*` flags, `BT_OFFHAND*` buttons, `CheckWeaponButtons(hand)`) is a full second
@@ -28,18 +30,21 @@ destroy the other hand's weapon and psprite (`wadsrc/static/zscript/actors/playe
 which is exactly the hand a bow needs. Use two ordinary one-hand weapons that cooperate by
 script instead.
 
-The real walls are: no haptics API (rumble only as a side effect of firing something),
-no runtime-deformable geometry (the drawn bowstring cannot be drawn), and `vr_two_handed_weapons`
-stabilisation silently kills the offhand (fires nothing, checks no buttons, renders nothing)
-the moment the player presses offhand grip near the gun.
+The real walls are: **no haptics API — which hurts a bow more than anything else here**, since
+rising draw tension is exactly what rumble is for and the only rumble available is the release
+buzz you get free from firing a sounding projectile; no runtime-deformable geometry (the drawn
+bowstring cannot be drawn, only frame-stepped); and `vr_two_handed_weapons` stabilisation,
+which silently kills the offhand — fires nothing, checks no buttons, renders nothing — the
+moment the player presses offhand grip within 0.50 m of the main hand, which is precisely where
+a bow draw puts them.
 
 ---
 
 ## 2. What already exists
 
-### 2.0 Correction to baseline §1a — the main hand *is* readable
+### 2.0 Both hands are fully tracked — verification of the baseline §1a correction
 
-The baseline says "there is no main-hand pose field". There is. It is not called `MainhandPos`:
+The main hand's pose is readable. It is simply not called `MainhandPos`:
 
 | ZScript field | Declared | Thunk | Native | What it is |
 |---|---|---|---|---|
@@ -133,6 +138,7 @@ that hand's origin and basis:
 - `A_ThrowGrenade` — `attacks.zs:568-615`
 - `A_CustomRailgun`-family with `CVF_RELATIVETOWEAPON` — `wadsrc/static/zscript/actors/actions.zs:79-96`, constant `constants.zs:193`
 - `OffhandDir` / `AttackDir` — `actor.zs:858-859`, mapped at `hw_vrmodes.cpp:395-424`, installed `hw_vrmodes.cpp:439-440`
+- `P_LineTrace` with `TRF_USEWEAPON` / `TRF_ISOFFHAND` — `src/playsim/p_map.cpp:5185-5200`
 
 All of them are gated on `player.mo.OverrideAttackPosDir`.
 
@@ -234,6 +240,12 @@ the player's feet. So `OffhandPos - mo.Pos` is hand-relative-to-body, in map uni
 `(OffhandPos.Z - mo.Pos.Z) * ps / vpm` is hand height above the floor in metres. Rotate the
 horizontal part by `-mo.Angle` to get left/right/forward in body frame. The error term is the
 roomscale decoupling between `CenterEyePos.XY` and `mo.Pos.XY`; it is small and does not drift.
+
+**B6 — "What is this hand touching?"** `LineTrace(angle, dist, pitch, TRF_USEWEAPON | TRF_ISOFFHAND, ...)`
+substitutes the real controller origin and basis for that hand (`src/playsim/p_map.cpp:5185-5200`,
+constants `wadsrc/static/zscript/constants.zs:962-963`). A 0.15 m trace is a contact test; a
+long one is a pointing test. This is the only surface query a hand has, and like everything
+else it is gated on `OverrideAttackPosDir`.
 
 ---
 
@@ -413,6 +425,13 @@ button edge → `player.PendingWeapon` = the empty-hand placeholder weapon.
 a proximity click on `CHAN_OFFWEAPON` when a hand enters a slot (the only feedback available,
 since no haptics), and whether slots are body-locked or view-locked.
 
+**Picking a world item off the floor with a hand.** The same proximity test works, but the
+pickup will **not** happen by itself: `P_TouchSpecialThing` fires only when the *moving* actor
+carries `MF_PICKUP` (`src/playsim/p_map.cpp:1737-1743`), and a hand is not an actor at all. So
+a grab must find the item (`BlockThingsIterator` around `OffhandPos`) and call
+`Inventory.CallTryPickup` / `Touch` on it directly. Do not build a design that assumes
+"move an invisible grabber actor onto the item and it gets picked up".
+
 **Caveat to flag up front:** `SwitchWeaponHand` (`player.zs:2488-2503`) already does a
 two-weapon swap, and it refuses `bNoHandSwitch` weapons and bails if either weapon is
 `bTwoHanded` (`:2498`). A holster system should call it where it fits rather than reimplement it.
@@ -439,10 +458,13 @@ One pk3, one evening, proves or kills the whole topic. **Do not build the bow fi
 
 **Step 1 — prove the measurement.** A single `Inventory` subclass, given to the player, whose
 `DoEffect()` prints once every 7 tics:
-`OverrideAttackPosDir`, `sepMetres` (B1), `stroke` (B3), and `WeaponState & WF_TWOHANDSTABILIZED`.
-Launch headless through `main_boottest.ps1` per the standing rule, read the log in
-`Documents/My Games/DoomXR/logs`. **If `OverrideAttackPosDir` is false or `sepMetres` does not
-move when the hands move, stop — everything in §4 is void and the answer is W6.**
+`OverrideAttackPosDir`, `AttackPos`, `OffhandPos`, `sepMetres` (B1), `stroke` (B3), and
+`WeaponState & WF_TWOHANDSTABILIZED`. Launch headless through `main_boottest.ps1` per the
+standing rule, read the log in `Documents/My Games/DoomXR/logs`.
+**Two kill conditions: if `OverrideAttackPosDir` is false, or if `AttackPos == OffhandPos`
+(the non-VR fallback at `hw_vrmodes.cpp:442-444`), stop — everything in §4 is void and the
+answer is W6.** Printing both positions rather than only the separation is what distinguishes
+"the hands are not tracked" from "the hands are tracked and the player is standing still".
 
 **Step 2 — prove one verb.** Add the shotgun pump (§4.3): a `Ready` loop that counts B3 strokes
 and prints a line per completed cycle. Cheapest honest gesture in the report; if it works, the
@@ -474,7 +496,14 @@ are all observable in one shot.
 5. **Does `vr_control_scheme >= 10` (left-handed) invert anything here?** `GetWeaponTransform`
    swaps which physical controller is "main" (`hw_vrmodes.cpp:463-465`), so `AttackPos` follows
    the dominant hand and B2's sense should hold — but this is reasoned, not tested.
-6. **Is a zero-damage `SeeSound` missile really enough to trigger the haptic?** The condition at
-   `p_mobj.cpp:7545-7547` reads as yes (`SeeSound != NO_SOUND` alone suffices), but it also
+6. **Is a zero-damage `SeeSound` missile really enough to trigger the release buzz?** The
+   condition at `p_mobj.cpp:7545-7547` reads as yes (`SeeSound != NO_SOUND` alone suffices) and
+   `VRMode::Vibrate` is genuinely implemented on PC (`gl_openvr.cpp:517-528`), but the buzz also
    requires `P_CheckMissileSpawn` to succeed at the hand position, which may fail when the hand
-   is inside geometry. Worth a bench test before any design leans on it.
+   is inside geometry, and `vr_enable_haptics` must be on. Worth a bench test before any design
+   leans on it.
+7. **Is W1 worth escalating to the owner as an engine ask?** A single `DEFINE_ACTION_FUNCTION`
+   over `VRMode::Vibrate` would make draw tension, crank resistance and slide detent all
+   feelable, and would serve every mod in the family, not just a bow. It is the one engine
+   addition this topic genuinely wants — but UZDXREMA is a different tree, and on *this* frozen
+   engine it stays a wall. Flagging it, not proposing it.

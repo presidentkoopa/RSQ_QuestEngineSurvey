@@ -749,9 +749,11 @@ thinker loop rather than the clock. Do not build around it.
 ### 5.5 Haptics on the time-stop — **WALL**
 
 A rumble on the freeze transition would sell it enormously. `VRMode::Vibrate` exists
-(`src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`) and is implemented
-(`hw_openxrdevice.cpp:754-757`) but has **no ZScript binding** — see `_BASELINE_FACTS.md` §4.
-Treat as unavailable.
+(`src/common/rendering/hwrenderer/data/hw_vrmodes.h:94`) and is wired through
+(`hw_openxrdevice.cpp:754-757`) but has **no ZScript binding**. Worse, the event-driven entry
+point is a **do-nothing stub**: `VR_HapticEvent` at `src/QzDoom/qzdoom_common.cpp:65` has an
+empty body. Confirmed independently by a second survey. Treat as unavailable; do not design a
+transition that needs it.
 
 ---
 
@@ -857,3 +859,13 @@ Steps 1–2 are the go/no-go. Steps 3–5 are polish and can be cut.
 
 5. **Whether `ChangeStatNum` to a sub-32 statnum is safe across a savegame.** Thinkers
    serialise by statnum list; a parked actor should restore parked. Not verified.
+
+6. **Catch radius and throw threshold for §4.6.** The capability is confirmed; the numbers are
+   a tuning exercise with a human in a headset, not something readable from source. Start at a
+   0.15 m catch radius and tune from there.
+
+**Closed since the first draft** (baseline correction of 2026-10-30): whether the main hand is
+readable — it is (`actor.zs:268-271`, gated on `OverrideAttackPosDir`). That upgraded
+bullet-catching and two-handed melee/grab from speculative to BUILDABLE/M. **No label in this
+report changed**, because nothing here was marked WALL or HACK solely for want of a second
+hand — the time machinery never depended on hand count.

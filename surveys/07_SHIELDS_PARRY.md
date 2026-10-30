@@ -373,6 +373,18 @@ and in `Tick()`: `SetOrigin(owner.OffhandPos + facingOffset, true);` then
 `angle = owner.OffhandAngle; pitch = owner.OffhandPitch; roll = owner.OffhandRoll;`
 (the angles are free and `+SHIELDREFLECT` reads `Angles.Yaw`).
 
+Two flags **not** in that list, deliberately:
+- **`+DONTINTERPOLATE`** (`src/scripting/thingdef_data.cpp:378`) — leave it off. Per §3.2 the
+  per-tic `Prev` snapshot already makes a teleporting plate render smoothly; disabling
+  interpolation would make it snap 35 times a second instead. Only set it if you ever draw a
+  model on the plate itself and want it pinned to the collider rather than tweened.
+- **`+NOINTERACTION`** (`thingdef_data.cpp:253`) — a trap. Its fast path in `AActor::Tick`
+  **forces `MF_NOBLOCKMAP`** (`src/playsim/p_mobj.cpp:3988-3992`: `flags |= MF_NOBLOCKMAP`), which
+  takes the plate out of the blockmap entirely and makes it block nothing. If you want a plate
+  that costs no thinking but still collides, use `freezetics` instead — it early-returns from
+  `Tick` at `p_mobj.cpp:3948-3952`, *above* the `NOINTERACTION` block, and leaves the actor linked.
+  `freezetics` is a writable `native uint` (`wadsrc/static/zscript/actors/actor.zs:265`).
+
 ---
 
 ### 4.1 Block — projectiles
@@ -386,19 +398,22 @@ and in `Tick()`: `SetOrigin(owner.OffhandPos + facingOffset, true);` then
 `absangle(AngleTo(other), angle) < coneDeg && abs(DeltaZ) < halfHeight`. This is what turns the
 square box back into a plate. It is called for missiles — `p_map.cpp:1508-1514` includes
 `tm.thing->flags & MF_MISSILE` — and only for SOLID pairs, so it is not a per-actor-per-tic cost.
+Projectile resolution in full is `PIT_CheckThing` `p_map.cpp:1589-1717`.
 **Feel knobs:** plate radius vs drawn shield size (under-cover ≈ "you must aim the shield",
 over-cover ≈ "forgiving"); cone half-angle in `CanCollideWith`; whether the plate leads the hand
 by its own half-depth along `OffhandAngle`; an impact sound + psprite recoil offset on
 `DamageMobj`.
-**Label: BUILDABLE. Cost: S.**
+**Label: EXISTS (a `+SOLID` actor blocking a missile is engine behaviour, `p_map.cpp:1677-1680`) +
+BUILDABLE (the plate). Cost: S.**
 
 ### 4.2 Block — hitscans
 
 **Player:** the same motion.
 **Detection:** none.
-**Resolution:** the plate must be `+SHOOTABLE` (`p_map.cpp:4919` masks the trace on it). It then
-takes the damage; override its `DamageMobj` to spend durability and return 0 so nothing else
-happens.
+**Resolution:** the plate must be `+SHOOTABLE` (`p_map.cpp:4919-4920` masks the trace on it).
+`CheckForActor` then returns `TRACE_Stop` on it as the first shootable actor along the ray, with
+**no test of whom the shot was aimed at** (`p_map.cpp:4673-4700`). It takes the damage; override
+its `DamageMobj` to spend durability and return 0 so nothing else happens.
 **Trap — your own gun.** The trace stops on the plate *before* any damage logic
 (`CheckForActor`, `p_map.cpp:4680-4700` → `TRACE_Stop`), so a `+SHOOTABLE` plate **eats your own
 bullets** if you fire through your own shield. `ThruBits` would fix it but only via the *puff's*
@@ -408,7 +423,8 @@ shoot your shield) and play a ricochet.
 **Feel knobs:** `+SHOOTABLE` permanently vs only while a "brace" button is held; damage factors per
 `DamageType` on the plate (`DamageFactor "Fire", 0.2`) so a shield resists some things and not
 others.
-**Label: BUILDABLE. Cost: S.** (The self-shot trap is the only real work.)
+**Label: EXISTS (the interception is engine behaviour, not inference — `p_map.cpp:4673-4700`) +
+BUILDABLE (the plate that uses it). Cost: S.** (The self-shot trap is the only real work.)
 
 ### 4.3 Block — melee and splash
 
@@ -516,6 +532,12 @@ blocked by it in `PIT_CheckThing` (`p_map.cpp:1753-1757`), their missiles will e
 **The honest caveat:** it does **not** break line of sight (`p_sight.cpp` has no actor test), so
 monsters still see, target and shoot at the player behind it — the shots just land on the barrier.
 That reads fine in play. It also does **not** stop splash (`p_map.cpp:6585`).
+**Make it cost nothing.** A planted barrier does not need to think. Set `freezetics` to a large
+value (`actor.zs:265`): `AActor::Tick` decrements it and returns at `p_mobj.cpp:3948-3952`, which
+is **above** everything else in `Tick`, while the actor stays linked into the blockmap and keeps
+colliding exactly as before. Re-arm it each time it is hit if you want a hit reaction. Do **not**
+reach for `+NOINTERACTION` to do this — it forces `MF_NOBLOCKMAP` (`p_mobj.cpp:3988-3992`) and the
+barrier silently stops blocking.
 **Feel knobs:** health; `Radius`/`Height`; whether `ThruBits` lets allies through; a decay timer;
 `+ACTLIKEBRIDGE` (`thingdef_data.cpp:211`) if you want to stand on it.
 **Label: BUILDABLE. Cost: S.**
@@ -538,8 +560,21 @@ Compute the throw vector from the last two `OffhandPos` samples — baseline §1
 - Catch: when `Distance3D(owner) < catchRadius` **and** the offhand is nearby, destroy it and
   re-ready the offhand weapon. Give it a grace state so a missed catch bounces off the player
   rather than hitting them.
-**Feel knobs:** throw gain; `bouncecount`; return speed curve; catch radius (be generous — one tic
-at return speed is several units); whether it rips (`+RIPPER`) or explodes.
+**The free impact callback — use `+SKULLFLY`, not `+MISSILE`.** `PIT_CheckThing` tests the
+*moving* actor for `MF_SKULLFLY` **before** any of the missile logic and hands you a virtual:
+```
+if (tm.thing->flags & MF_SKULLFLY)
+{ bool res = tm.thing->CallSlam(tm.thing->BlockingMobj); tm.thing->BlockingMobj = NULL; return res; }
+```
+`src/playsim/p_map.cpp:1552-1557`, virtual declared `virtual native bool Slam(Actor victim);` at
+`wadsrc/static/zscript/actors/actor.zs:520`. Override `Slam` on the thrown shield and you get
+"the shield hit *this* actor, decide what happens" in one place — damage it, ricochet to the next
+target, count the bounce, start the return — with the return value deciding whether the shield
+keeps going. That is a far better fit for a returning shield than wiring up `+MISSILE` plus
+bounce flags plus `SpecialMissileHit`, and it sidesteps the fact that `SpecialMissileHit` is on
+the missile (§5.5) by *making the shield the missile*.
+**Feel knobs:** throw gain; bounce count; return speed curve; catch radius (be generous — one tic
+at return speed is several units); whether `Slam` damages or just ricochets.
 **Label: BUILDABLE. Cost: M.** (Three states, a catch window, and a throw-gesture detector that
 has to behave on 2-4 samples.)
 
@@ -573,6 +608,34 @@ early from `DamageMobj` while the window is open — this is the strongest reaso
 regeneration when not hit for N tics; a cracked-model swap at health thresholds.
 **Label: BUILDABLE. Cost: S.**
 
+### 4.12 Sword-and-board — blade-on-shield, and bash-while-aiming
+
+Now available because the **weapon hand is readable too** (§2.3), which the original baseline said
+it was not.
+
+**Player:** holds a weapon in the main hand and a shield in the offhand, and can use both at once.
+**Detection:** both poses, every tic, gated on `OverrideAttackPosDir` (`actor.zs:276`):
+`AttackPos`/`AttackAngle`/`AttackPitch`/`AttackRoll` and `OffhandPos`/`OffhandAngle`/`OffhandPitch`/
+`OffhandRoll` (`actor.zs:268-275`).
+**What it unlocks:**
+- **Real blade-on-shield geometry.** `(AttackPos - OffhandPos)` and the angle between
+  `AttackAngle` and `OffhandAngle` tell you whether the sword is resting on the shield, crossed
+  behind it, or clear of it — so a two-handed brace stance, a sword-over-shield guard, or a
+  "you just clipped your own shield" clang are all measurable, not guessed.
+- **Bash while aiming.** The shield bash (§4.7) uses `LAF_ISOFFHAND` and the gun uses the main
+  hand; they are separate origins in `P_LineAttack` (`p_map.cpp:4784-4799`) and separate psprite
+  layers (`PSP_OFFHANDWEAPON`, baseline §2). Nothing couples them. Bash and fire in the same tic
+  works.
+- **Two shields.** Nothing in §4.1-§4.11 is offhand-specific except which pose field it reads.
+  A second plate on `AttackPos` with `AttackAngle` is the same code with four identifiers changed.
+**Feel knobs:** the hand-separation distance that counts as "braced"; whether bracing widens the
+plate (§4.10) or lengthens the parry window (§4.4); whether a main-hand swing that intersects the
+shield plate is suppressed.
+**Label: BUILDABLE. Cost: M.** (The primitives are all S; the cost is the stance state machine.)
+**Caveat:** `AttackPos`/`AttackAngle` are also what the engine aims the player's gun with
+(`p_map.cpp:4794-4798`). Reading them is free; nothing here writes them, and they are
+`native readonly` anyway (`actor.zs:268-271`).
+
 ---
 
 ## 5. Walls
@@ -598,9 +661,10 @@ regeneration when not hit for N tics; a cracked-model swap at health thresholds.
 7. **No haptics from ZScript** (`_BASELINE_FACTS.md` §4). A shield impact is the single most
    deserving haptic event in this whole survey and there is no way to fire one. Budget sound and
    a psprite kick instead.
-8. **No hand velocity field** (`_BASELINE_FACTS.md` §1b) and 35 Hz sampling (§3). Every gesture in
-   §4.4, §4.7 and §4.9 is built on two stored samples. *Not* a wall — just the whole reason the
-   thresholds have to be generous and double-confirmed.
+8. **No hand velocity field** and 35 Hz sampling (`_BASELINE_FACTS.md` §1b, §3). Every gesture in
+   §4.4, §4.7, §4.9 and §4.12 is built on two stored samples. *Not* a wall — just the whole reason
+   the thresholds have to be generous and double-confirmed. This one survived the 10-30 baseline
+   correction unchanged: **both** hands are readable, but neither reports a velocity.
 9. **The plate does not sweep.** `SetOrigin` teleports (`p_maputl.cpp:563-571`); there is no
    swept-volume move anywhere in the actor API. At parry speeds (§3.1) the plate steps over a
    14-23 cm band each tic. *Missing piece:* a continuous-collision move. *Substitute:* do fast
@@ -610,6 +674,11 @@ regeneration when not hit for N tics; a cracked-model swap at health thresholds.
     speed-based and needs a map-authored polyobject. Dead end for hand tracking; worth knowing
     only so nobody spends a day on it.
 
+**Not a wall, recorded so nobody re-derives it:** the plate's one-tic positional lag is inherent
+(the `Prev` snapshot at `src/p_tick.cpp:151-162` is per-tic by design) but it is **smooth**, not
+juddery, and §3.1 prices it at a hand's thickness during a block. The answer is the psprite/plate
+split of §3.2, not an engine change.
+
 ---
 
 ## 6. Smallest prototype
@@ -617,11 +686,14 @@ regeneration when not hit for N tics; a cracked-model swap at health thresholds.
 One offhand `Weapon` + one plate actor. Should be ~120 lines of ZScript and no new art beyond a
 cube.
 
-1. `class RSQ_ShieldPlate : Actor` — `+SOLID +NOGRAVITY +NOTAUTOAIMED +NEVERTARGET +DONTINTERPOLATE`,
-   `RenderStyle "None"`, `Radius 10`, `Height 20`. In `Tick()`:
-   `if (owner) SetOrigin(owner.OffhandPos, true);` plus copy `OffhandAngle` into `angle`.
+1. `class RSQ_ShieldPlate : Actor` — `+SOLID +NOGRAVITY +NOTAUTOAIMED +NEVERTARGET +FORCEINFIGHTING`,
+   `RenderStyle "None"`, `Radius 10`, `Height 20`. **No `+DONTINTERPOLATE`, no `+NOINTERACTION`**
+   (§4 preamble). In `Tick()`: `if (owner) SetOrigin(owner.OffhandPos, true);` plus copy
+   `OffhandAngle` into `angle`.
 2. `class RSQ_Shield : Weapon` — `+OffhandWeapon`. `Ready` spawns the plate once and stores it;
-   `Deselect`/`Destroy` destroys it. Gate the whole thing on `player.PlayInVR`.
+   `Deselect`/`Destroy` destroys it. Gate the whole thing on `owner.OverrideAttackPosDir`
+   (`actor.zs:276`) — that is the flag that says the pose fields are real hand poses, not the
+   non-VR fallback of `hw_vrmodes.cpp:440-444`.
 3. **Verify blocking first, before anything else:** stand in front of an imp, hold the offhand in
    the fireball's path, confirm the fireball dies on nothing visible. If it does not, the bug is
    almost certainly `SetXYZ` instead of `SetOrigin`, or `+NONSHOOTABLE` inherited from a parent
@@ -634,6 +706,9 @@ cube.
    shape.
 6. Add `+SHOOTABLE` + `Health` + a `DamageMobj` override last, and only then deal with the
    self-shot trap of §4.2.
+
+Sword-and-board (§4.12) is step 7 and changes nothing above it: it is the same plate class reading
+`AttackPos`/`AttackAngle` instead of the offhand pair.
 
 Steps 1-3 are the whole central problem. If they land, everything in §4 is additive.
 
@@ -663,3 +738,10 @@ Steps 1-3 are the whole central problem. If they land, everything in §4 is addi
 7. **`+ALLOWTHRUBITS` on the player side.** Setting `ThruBits` on `PlayerPawn` is a mod touching
    the player class, which may conflict with other mods in the family. Is a shared `ThruBits`
    allocation needed across RSQ mods?
+8. **Does the weapon-hand plate (§4.12) fight the aim?** `AttackPos` is the origin of every
+   `P_LineAttack` the player makes (`p_map.cpp:4794-4798`). A second plate parked at `AttackPos`
+   would sit exactly on the muzzle. Offsetting it along `AttackAngle` is the obvious fix, by how
+   much is a measurement, not a guess.
+9. **Does `freezetics` interact badly with a `+SHOOTABLE` barrier?** The early return at
+   `p_mobj.cpp:3948-3952` skips state advancement, so a frozen barrier cannot run a Pain or Death
+   state until it is unfrozen. Clearing `freezetics` from `DamageMobj` should cover it; untested.

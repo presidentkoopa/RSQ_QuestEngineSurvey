@@ -82,6 +82,8 @@ over the axes, which is what `MENUDEF.txt`'s `OptionString` preset rows already 
 
 ## 1. THE SAG — settled, with the line that draws it
 
+> **SUPERSEDED, 2026-10-30 — see `apply/08_WHIP_DESIGN.md`.** The diagnosis below stands, but the owner says the droop is what made him see a whip in the first place: `08` keeps the slack as a charge gauge, fires the crack when the drawn loop reaches the popper (`whip.zs:99` fires it at `phase = 1.0`, two thirds of the way down a wave whose `1.5·u` term means the loop lands at `phase = 1.5`), and deletes only the constants — **do not delete the sag.**
+
 **Verdict: the owner's first candidate is the right half of the answer, but the cause is not
 `BACK_TICS` on its own. The sag is DRAWN, deliberately, by four lines in `Draw`. It is not a physics
 artefact and it is not the bow-wave failing to clear.**

@@ -1,0 +1,8 @@
+# Survey repo: documents only.
+*.pk3
+*.wad
+*.zip
+*.7z
+*.tar.gz
+_backups/
+_logs/

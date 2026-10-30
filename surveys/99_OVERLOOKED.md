@@ -20,9 +20,20 @@ it is the boundary of a **second render pass with different clearing rules**:
   `PSP_OFFHANDWEAPON` and `PSP_FLASH` (`p_pspr.cpp:1275-1276`)
 - They are given `PSPF_CVARFAST|PSPF_POWDOUBLE` automatically — `p_pspr.cpp:360-362`
 
-**What it could become:** persistent **hand-mounted instruments** — a wrist panel, a permanent
-gauge, a held tool, a hand model that survives weapon switches and overlay clears without a
-custom statusbar.
+**What it could become:** a persistent **sprite** overlay that survives `A_ClearOverlays(…, safety)`
+— and that is now the band's *only* real edge, see the corrections below.
+
+> **Correction (11_HUD_MODELS, verified here).** This entry originally said the band was the way
+> to get "a hand model that survives weapon switches". Both halves of that were wrong.
+> **No layer at or above `PSP_TARGETCENTER` can draw a model at all** —
+> `PrepareTargeterSprites` hardcodes `hudsprite.mframe = nullptr` (`hw_weapon.cpp:1058`) and the
+> model call site is gated on `mframe` (`:101-108`). The band is sprites only.
+> **And the band is not what grants survival.** The cull at `player.zs:559-563` gates its
+> "weapon not currently selected" clause on `pspr.Caller is "Weapon"`, so a layer owned by a
+> plain `Inventory` item persists across weapon switches **at any layer id**. Persistence comes
+> from the **caller**, not the band.
+> The wrist-panel idea still works — just below the band, owned by an item. See
+> `surveys/11_HUD_MODELS.md` for the recipe.
 
 **Correction (03_MECHS).** My first draft of this entry called it a cockpit frame. It is not —
 **the band is not view-locked.** `PrepareTargeterSprites` pushes into the same `hudsprites`
@@ -33,9 +44,17 @@ likewise at `src/r_data/models.cpp:219-226`), and `psp.x` / `psp.y` become **rot
 translations (`hw_weapon.cpp:108`). A head-locked cockpit frame is a **WALL**; see
 `03_MECHS.md`, which builds the cockpit from spawned actors instead.
 
-**The trap:** a layer created at or above `PSP_TARGETCENTER` defaults its `Caller` to the
-player's `PowerTargeter` inventory item (`p_pspr.cpp:310-318`). Without that powerup the layer
-has a null caller and gets culled. Pass `newcaller` explicitly when creating it.
+**The traps — both corrected by 11_HUD_MODELS, verified here:**
+
+1. A layer created at or above `PSP_TARGETCENTER` defaults its `Caller` to the player's
+   `PowerTargeter` item (`p_pspr.cpp:310-318`). Without that powerup the layer is **not
+   created at all** — `GetPSprite` returns `nullptr` (`p_pspr.cpp:334`). It is not "culled
+   later", as this entry first said; nothing ever exists. Pass `newcaller` explicitly.
+2. The targeter render pass starts at `FindPSprite(PSP_TARGETCENTER)` (`hw_weapon.cpp:1068`),
+   which matches that id **exactly** (`p_pspr.cpp:241-254`). So a layer at `PSP_TARGETCENTER + 1`
+   or `+ 2` draws **only while something else holds `PSP_TARGETCENTER` itself** — in practice
+   the crosshair, which that same loop then skips (`:1070`). Depending on an unrelated layer's
+   existence is not a foundation; put the panel below the band and own it with an item.
 
 ---
 

@@ -17,6 +17,7 @@ resolves, the tuning knobs, and the real function names.
 | File | Why |
 |---|---|
 | **[surveys/00_CAPABILITIES.md](surveys/00_CAPABILITIES.md)** | The shared foundation. **§0 is a go/no-go** — read it before writing code. §7 is the thirteen gotchas that silently eat prototypes. |
+| **[surveys/11_HUD_MODELS.md](surveys/11_HUD_MODELS.md)** | Who owns a psprite layer decides which hand it rides, whether it survives a weapon switch, and whether it can be a model at all. Read before building any wrist panel, gauge or held instrument. |
 | **[surveys/99_OVERLOOKED.md](surveys/99_OVERLOOKED.md)** | Mechanics nobody asked for, found while reading the source. **§1a is the best single find in the survey.** |
 
 ### The five facts that shape every design here

@@ -341,12 +341,48 @@ The gap between 1 and 1000, and between 1000 and 1000000, is yours.
 That gives each hand its own stack of independently positioned, independently animated overlay
 layers. Per-layer position is script-writable each tic via the `PSprite` object.
 
-### 2.3 Models
+### 2.3 Models — and who owns a layer decides everything
 
-MODELDEF attaches models to weapon states as normal. The per-frame hand pose means a model
-drawn on the offhand follows the real controller without any script work. Driving a model's
-position or rotation *per tic from script* is where it gets interesting, and the topic reports
-that need it (vehicles, mechs, shields) each work out their own route.
+MODELDEF attaches models to states as normal, and the per-frame hand pose means a model on a
+hand layer follows the real controller with no script work. But **the owner (`Caller`) of a
+psprite layer, not its layer number, decides which hand it rides, whether it survives a weapon
+switch, and whether it can be a model at all.** `11_HUD_MODELS.md` is the full report; these are
+the rules.
+
+**A non-weapon owner works.** A plain `Inventory` item can own a HUD-model layer — nothing in
+the model path requires a `Weapon` (`hw_weapon.cpp:922`, MODELDEF has no weapon gate at
+`models.cpp:750-756`, and `Actor.DefaultStateUsage = SUF_ACTOR|SUF_OVERLAY` at `actor.zs:458`
+makes an item's states legal overlay states).
+
+**But the hand choice is a two-way ternary with no third case:**
+```
+src/r_data/models.cpp:221
+int hand = psp->GetCaller() == playermo->player->OffhandWeapon ? 1 : 0;
+```
+So anything whose caller is not literally the offhand weapon draws on the **main hand**.
+A non-weapon-owned model on the **off hand is a WALL**. The flip side is useful: such a layer
+can never satisfy the `weaponStabilised` skip (`hw_weapon.cpp:832`, `:917`), so it is
+**immune to the two-hand trap** in gotcha 10a.
+
+**No layer at or above `PSP_TARGETCENTER` can draw a model at all** —
+`PrepareTargeterSprites` hardcodes `hudsprite.mframe = nullptr` (`hw_weapon.cpp:1058`), and the
+model call site is gated on `mframe` (`:101-108`). That band is sprites only.
+
+**`GetPSprite(id)` from ZScript cannot set an owner** — the binding has no caller parameter
+(`player.zs:3142`), and `player_t::GetPSprite` defaults an ordinary layer's caller to
+`ReadyWeapon` (`p_pspr.cpp:331-332`). Use `SetPsprite(id, state, pending, newcaller)`
+(`player.zs:3140`) or your MODELDEF, keyed on the item, will never match.
+
+**Survival across a weapon switch comes from the caller, not the band.** The cull at
+`player.zs:559-563` gates its "weapon not currently selected" clause on
+`pspr.Caller is "Weapon"`; a plain `Inventory` caller is only tested for *ownership*. So an
+item-owned layer persists across weapon switches **at any layer id**, and dies only when the
+item leaves inventory — or to `A_ClearOverlays`, which tests no caller at all.
+
+Two more gotchas on a fresh layer: `GetPSprite` sets `PSPF_ADDBOB|PSPF_ADDWEAPON`
+unconditionally (`p_pspr.cpp:355-365`), and `huds->my` is fed as a **rotation**
+`(my - WEAPONTOP)/-4` (`hw_weapon.cpp:108`, `WEAPONTOP = 32`), so a fresh layer at `y = 0` is
+pitched about +8°. Clear the two flags and set `psp.y = 32`.
 
 ---
 

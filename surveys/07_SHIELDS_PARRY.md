@@ -29,6 +29,14 @@ down at parry/bash speeds (5-8 m/s → 4.9-7.8 units, 24-38% of the shield's wid
 the plate steps straight past a projectile because it sweeps nothing. That is the one place the
 design must not rely on the plate.
 
+**One structural decision has to be made before any code: do not host the shield as an offhand
+`Weapon`.** Offhand grip with the hands inside 0.50 m sets `weaponStabilised`
+(`src/rendering/gl/stereo3d/gl_openvr.cpp:1717-1728`) with no `bTwoHanded` test, and the offhand
+weapon then fires nothing, reads no buttons and **renders nothing** — at exactly the pose a player
+uses to brace a shield. A plate actor plus a plain psprite overlay sidesteps it entirely, because
+the render suppression is keyed on the layer's *caller* being `OffhandWeapon`
+(`hw_weapon.cpp:832`), and the plate has to be a world actor anyway. Full working in §2.4.
+
 The hard limits are shape and sight. Actor collision is **not a cylinder** — it is an
 axis-aligned box with a square footprint, `fabs(dx) < r+r && fabs(dy) < r+r` and a vertical
 `[Z, Z+Height]` slab (`src/playsim/p_map.cpp:1417-1419`, `:1633-1643`,
@@ -123,13 +131,67 @@ Thunks `src/scripting/vmthunks_actors.cpp:2187-2194`; natives `src/playsim/actor
 - `LineAttack(..., LAF_ISOFFHAND, ...)` fires a hitscan **from the shield hand** —
   `src/playsim/p_map.cpp:4786-4792`, flag at `wadsrc/static/zscript/constants.zs:946`. This is
   the shield bash, already wired.
-- The shield can be an **offhand `Weapon`** with its own psprite layer and state machine
-  (`+OffhandWeapon`, `PSP_OFFHANDWEAPON`) — see `_BASELINE_FACTS.md` §2. HUD **models** render on
-  that layer in VR at the render-frame hand transform
-  (`src/rendering/hwrenderer/scene/hw_weapon.cpp:107-108`, `:139-141`;
+- The shield *could* be an **offhand `Weapon`** (`+OffhandWeapon`, `PSP_OFFHANDWEAPON`) — see
+  `_BASELINE_FACTS.md` §2 — and HUD **models** render on psprite layers in VR at the render-frame
+  hand transform (`src/rendering/hwrenderer/scene/hw_weapon.cpp:107-108`, `:139-141`;
   `VRMode::GetWeaponTransform(out, VR_OFFHAND)` at `hw_vrmodes.cpp:455-470`).
+  **But do not host it that way — see §2.4.**
 
-### 2.4 Pass-through pairing (`ThruBits`)
+### 2.4 THE TWO-HAND TRAP — read this before choosing how to host the shield
+
+**A shield is the archetypal offhand weapon, and bringing it across to guard the sword arm is
+exactly the pose that disables it.** Found by the bows survey, re-verified here line by line.
+
+`src/rendering/gl/stereo3d/gl_openvr.cpp:1717-1728`:
+```
+if (vr_two_handed_weapons &&
+    (pOffTrackedRemoteNew->ulButtonPressed & ButtonMaskFromId(k_EButton_Grip)) !=
+    (pOffTrackedRemoteOld->ulButtonPressed & ButtonMaskFromId(k_EButton_Grip)))
+{
+    if (pOffTrackedRemoteNew->ulButtonPressed & ButtonMaskFromId(k_EButton_Grip)) {
+        if (distance < 0.50f) { weaponStabilised = true; }
+    } else { weaponStabilised = false; }
+}
+```
+`distance` is the raw 3D controller separation (`:1710-1715`). **There is no `bTwoHanded` test, no
+test that an offhand weapon exists, and no test of what that weapon is.** Offhand grip + hands
+inside half a metre, and the offhand goes dark:
+
+| Consequence | Line |
+|---|---|
+| Offhand weapon fires nothing | `wadsrc/static/zscript/actors/player/player.zs:393-396`, also `:426`, `weapons.zs:415` |
+| Offhand weapon checks no buttons | `src/playsim/p_pspr.cpp:755-758` |
+| Offhand psprite renders nothing | `src/rendering/hwrenderer/scene/hw_weapon.cpp:832-835`, `:917-920` |
+| `WF_TWOHANDSTABILIZED` re-asserted on **every** state set, so script cannot durably clear it | `src/playsim/p_pspr.cpp:507-515` — the flag is cleared at `:509` and immediately re-OR'd at `:512-515` |
+
+Flag at `src/playsim/d_player.h:164`, mirrored `wadsrc/static/zscript/constants.zs:1242`.
+
+**Two corrections to how this reached me, both load-bearing:**
+
+1. **Only the OpenVR path sets it.** `weaponStabilised` is one global bool
+   (`src/QzDoom/qzdoom_common.cpp:19`, declared `hw_vrmodes.h:100`) and the *only* writes in the
+   entire tree are `gl_openvr.cpp:1723` and `:1726`. `hw_openxrdevice.cpp` never writes it. So on
+   an **OpenXR runtime — VDXR, which is this owner's setup — the trap does not fire today.**
+   Do not build on that: it is one global, one patch away from being set on both paths, and a mod
+   that silently breaks under SteamVR is still broken.
+2. **The escape hatch is visible in the suppression itself.** Both render skips are keyed on
+   `psp->GetCaller() == player->OffhandWeapon` (`hw_weapon.cpp:832`, `:917`) — **not** on the
+   layer ID. A psprite layer whose caller is not the offhand `Weapon` object keeps rendering, and
+   the fire/button gates (`player.zs:393`, `p_pspr.cpp:755`) only guard `hand == 1` *weapon*
+   logic, which a non-weapon layer never enters.
+
+**Therefore: do not host the shield as an offhand `Weapon`.** Host it as a plate actor plus a
+plain psprite overlay layer whose caller is not `OffhandWeapon`. This costs nothing — the plate
+has to be a world actor regardless (§3.2), and the shield's state is a handful of fields on that
+actor rather than a `Weapon` state machine. The shield then survives the grip-brace pose, survives
+`vr_two_handed_weapons` being on, and leaves the offhand weapon slot free for an actual weapon
+(§4.12). This revises §4's preamble and §6 step 2 accordingly.
+
+If you *must* ship it as an offhand `Weapon`: keep the guard pose beyond 0.50 m, and read
+`player.WeaponState & WF_TWOHANDSTABILIZED` (`constants.zs:1242`) each tic so it fails loudly
+rather than silently.
+
+### 2.5 Pass-through pairing (`ThruBits`)
 
 `if ((thing->ThruBits & tm.thing->ThruBits) && ((thing->flags8 | tm.thing->flags8) & MF8_ALLOWTHRUBITS)) return true;`
 — `src/playsim/p_map.cpp:1412`, and the same at `:534` and `:2111`.
@@ -165,7 +227,12 @@ Hitscans honour `ThruBits` too, but only via the **puff's** bits
 `CVAR(Float, vr_vunits_per_meter, 34.0f, ...)` — `hw_vrmodes.cpp:94`.
 Tic = 1/35 s = 28.57 ms (`_BASELINE_FACTS.md` §3).
 
-- 1 map unit horizontally = **2.94 cm**; vertically (pixelstretch 1.2) = **3.53 cm**.
+- 1 map unit horizontally = **2.94 cm**; vertically = **3.53 cm**. The vertical difference is
+  `level.pixelstretch` (default 1.2), applied on the Z lines of both hand poses
+  (`hw_openxrdevice.cpp:595`, `:610`) and in the OpenVR transform (`gl_openvr.cpp:1282-1292`).
+  **Forget it and every vertical distance you compute reads ~17% short** (1/1.2 = 0.83) — which,
+  on a shield whose job is to be in front of a face, is the difference between covering the head
+  and covering the chin.
 - A 60 cm shield is **20.4 map units** across (radius ~10) and, at 90 cm tall, **25.5** units high.
 
 | Hand speed | per tic (cm) | per tic (map units, XY) | as a fraction of a 60 cm shield |
@@ -353,13 +420,64 @@ durability system) and becomes a legitimate autoaim candidate (`p_map.cpp:4378`)
 `TRF_SOLIDACTORS` adds `MF_SOLID` (`p_map.cpp:5249-5250`), so your own detection traces can see
 the plate and see missiles, whatever their flags.
 
+### 3.5 Haptics — the impact thump, and how close you can get
+
+The baseline (§4) calls haptics unreachable. That is too pessimistic in one direction and too
+optimistic in another; here is what is actually in the tree.
+
+**What is implemented:**
+- `VRMode::Vibrate(duration, channel, intensity)` is a virtual with an empty base
+  (`src/common/rendering/hwrenderer/data/hw_vrmodes.h:93`).
+- **OpenVR overrides it for real** — `gl_openvr.h:121-124` → `OpenVRHaptics::Vibrate`
+  (`src/rendering/gl/stereo3d/gl_openvr.cpp:517-528`), queued and flushed by `ProcessHaptics`,
+  gated on `vr_enable_haptics` (`hw_vrmodes.cpp:125`, checked `gl_openvr.cpp:532`).
+- **OpenXR overrides it too** — `hw_openxrdevice.h:83`, impl `hw_openxrdevice.cpp:755-757`, which
+  calls `QzDoom_Vibrate`. **But `QzDoom_Vibrate` has no definition anywhere in this repository**
+  — only the forward declaration at `hw_openxrdevice.cpp:140` and that one call site. It must be
+  supplied by the Quest-side native layer, which the PC edition does not build. So on the OpenXR
+  path, treat haptics as **unproven** until someone cites the definition.
+- `VR_HapticEvent(...)` is an **empty stub** — `src/QzDoom/qzdoom_common.cpp:65-67`.
+- **Neither is bound to ZScript.** Zero hits for vibrate/haptic/rumble in `wadsrc/static/zscript`.
+
+**But `Vibrate` is called from playsim, on a path a mod controls.** `P_LineAttack`,
+`src/playsim/p_map.cpp:4762-4775`:
+```
+if ( damage > 0) {
+    long rightHanded = vr_control_scheme < 10;
+    rightHanded = (flags & LAF_ISOFFHAND) ? 1 - rightHanded : rightHanded;
+    vrmode->Vibrate(150, rightHanded ? 1 : 0, 0.8);
+    ...
+```
+and the same block in `P_SpawnPlayerMissile` (`src/playsim/p_mobj.cpp:7549-7562`). The gate is
+`damage > 0` **and nothing else** — in particular it is *not* gated on `LAF_NOINTERACT`, which
+sits further down (`p_map.cpp:4772` is reached before the `nointeract` branches).
+
+**So the shield can fire an impact thump on the shield hand:**
+```
+LineAttack(angle, 0.1, pitch, 1 /*damage>0, required*/, "None", "RSQ_NullPuff",
+           LAF_NOINTERACT | LAF_ISOFFHAND);
+```
+`LAF_NOINTERACT` (`constants.zs:941`) means no damage dealt, no sound, no blood, no decal — it
+spawns a puff and returns it (`p_map.cpp:4930-4972`), so give it a puff class with no sprite and
+`-1`-tic Stop. `LAF_ISOFFHAND` flips the channel to the shield controller (`p_map.cpp:4767`).
+Result: a 150 ms, 0.8-intensity pulse on the correct hand, and nothing else happens in the world.
+
+**Label: HACK. Cost: S.** It is a hardcoded fire event provoked for its side effect — exactly the
+case the baseline §4 says to call HACK rather than BUILDABLE. Duration, channel and intensity are
+the literals `150` / `0.8` and cannot be varied from script; a "heavy block" and a "light tick"
+are the same pulse. On OpenXR it may do nothing at all (see above). Budget sound and a psprite
+kick as the primary feedback and treat this as a bonus.
+
 ---
 
 ## 4. Mechanic designs
 
-Throughout, **"the shield"** is an offhand `Weapon` (`+OffhandWeapon`, baseline §2) carrying the
-MODELDEF model on `PSP_OFFHANDWEAPON`, and **"the plate"** is an invisible actor it spawns, owns
-in a pointer, moves in its own `Tick`, and destroys when the shield is put away.
+Throughout, **"the shield"** is a **plate actor plus a plain psprite overlay layer** — *not* an
+offhand `Weapon`, for the reason in §2.4. The plate is an invisible world actor that owns the
+shield's state, moves itself in its own `Tick`, and is destroyed when the shield is stowed; the
+overlay layer carries the MODELDEF model and is drawn at the render-frame hand transform. The
+layer's caller must not be `player.OffhandWeapon`, or the suppression at `hw_weapon.cpp:832`
+applies to it.
 
 Plate defaults, unless a mechanic says otherwise:
 ```
@@ -632,9 +750,15 @@ it was not.
 plate (§4.10) or lengthens the parry window (§4.4); whether a main-hand swing that intersects the
 shield plate is suppressed.
 **Label: BUILDABLE. Cost: M.** (The primitives are all S; the cost is the stance state machine.)
-**Caveat:** `AttackPos`/`AttackAngle` are also what the engine aims the player's gun with
+**Caveat 1:** `AttackPos`/`AttackAngle` are also what the engine aims the player's gun with
 (`p_map.cpp:4794-4798`). Reading them is free; nothing here writes them, and they are
 `native readonly` anyway (`actor.zs:268-271`).
+**Caveat 2 — this mechanic is where §2.4 bites hardest.** "Bring the shield across to guard the
+sword arm" *is* hands-inside-0.50 m, and if the player's thumb is on the offhand grip that sets
+`weaponStabilised` (`gl_openvr.cpp:1717-1728`). Hosted as an offhand `Weapon`, the shield
+disappears at the exact instant the stance is adopted. Hosted as a plate + overlay layer it does
+not. If the main-hand weapon is a real `Weapon` and the player *wants* two-handed stabilisation
+for it, that still works and is unaffected — the suppression only ever targets the offhand weapon.
 
 ---
 
@@ -658,9 +782,12 @@ shield plate is suppressed.
    shield-side hooks are `CanCollideWith` and `DamageMobj`; plan around those two.
 6. **The `+SHIELDREFLECT` cone is a hardcoded 45°** (`p_mobj.cpp:3471`). No property, no cvar.
    *Substitute:* plain `+REFLECTIVE` plus your own cone in `CanCollideWith`.
-7. **No haptics from ZScript** (`_BASELINE_FACTS.md` §4). A shield impact is the single most
-   deserving haptic event in this whole survey and there is no way to fire one. Budget sound and
-   a psprite kick instead.
+7. **No haptic call bound to ZScript** — but see §3.5, because the picture is better than the
+   baseline says and the plain statement is: *you cannot fire a haptic pulse directly, you can
+   only provoke one.* A shield impact is the single most deserving haptic event in this survey.
+   **The highest-value engine addition for this topic, by a wide margin, is a ZScript binding for
+   `VRMode::Vibrate(duration, channel, intensity)`** (`hw_vrmodes.h:93`) — one thunk, no new
+   state, usable by every mod in the family, not just shields.
 8. **No hand velocity field** and 35 Hz sampling (`_BASELINE_FACTS.md` §1b, §3). Every gesture in
    §4.4, §4.7, §4.9 and §4.12 is built on two stored samples. *Not* a wall — just the whole reason
    the thresholds have to be generous and double-confirmed. This one survived the 10-30 baseline
@@ -690,10 +817,15 @@ cube.
    `RenderStyle "None"`, `Radius 10`, `Height 20`. **No `+DONTINTERPOLATE`, no `+NOINTERACTION`**
    (§4 preamble). In `Tick()`: `if (owner) SetOrigin(owner.OffhandPos, true);` plus copy
    `OffhandAngle` into `angle`.
-2. `class RSQ_Shield : Weapon` — `+OffhandWeapon`. `Ready` spawns the plate once and stores it;
-   `Deselect`/`Destroy` destroys it. Gate the whole thing on `owner.OverrideAttackPosDir`
-   (`actor.zs:276`) — that is the flag that says the pose fields are real hand poses, not the
-   non-VR fallback of `hw_vrmodes.cpp:440-444`.
+2. **Not** a `Weapon` (§2.4). An inventory item or an event handler spawns the plate and gives the
+   player a psprite overlay layer for the model whose caller is **not** `player.OffhandWeapon`.
+   Gate the whole thing on `owner.OverrideAttackPosDir` (`actor.zs:276`) — that is the flag that
+   says the pose fields are real hand poses, not the non-VR fallback of `hw_vrmodes.cpp:440-444`.
+2a. **Prove §2.4 in the prototype, before building on it.** With `vr_two_handed_weapons 1`, hold
+   the offhand grip with the hands together and confirm the shield still draws and still blocks.
+   On an OpenXR runtime it will pass trivially (nothing sets `weaponStabilised` there); set
+   `weaponStabilised` by hand under OpenVR, or just confirm the layer's caller is not the offhand
+   weapon, which is what `hw_weapon.cpp:832` actually tests.
 3. **Verify blocking first, before anything else:** stand in front of an imp, hold the offhand in
    the fireball's path, confirm the fireball dies on nothing visible. If it does not, the bug is
    almost certainly `SetXYZ` instead of `SetOrigin`, or `+NONSHOOTABLE` inherited from a parent
@@ -742,6 +874,17 @@ Steps 1-3 are the whole central problem. If they land, everything in §4 is addi
    `P_LineAttack` the player makes (`p_map.cpp:4794-4798`). A second plate parked at `AttackPos`
    would sit exactly on the muzzle. Offsetting it along `AttackAngle` is the obvious fix, by how
    much is a measurement, not a guess.
-9. **Does `freezetics` interact badly with a `+SHOOTABLE` barrier?** The early return at
+9. **Is `weaponStabilised` reachable on the OpenXR path by any route I did not find?** I grepped
+   the whole tree: the only writes are `gl_openvr.cpp:1723` and `:1726`. If the Quest-side native
+   layer (outside this repo) also sets it, the §2.4 trap is live on VDXR today and the
+   plate+overlay hosting goes from "right answer" to "mandatory".
+10. **Is `QzDoom_Vibrate` defined anywhere outside this repository?** It is declared at
+   `hw_openxrdevice.cpp:140` and called at `:757` with no definition in-tree. Until someone cites
+   it, the §3.5 haptic thump is OpenVR-only and may be silent on the owner's actual setup.
+11. **Does `LAF_NOINTERACT` with `damage = 1` really reach `p_map.cpp:4772` with no side effects?**
+   The code path reads that way and the `nointeract` branches are all downstream, but it spawns a
+   puff (`:4930-4972`) and I did not trace every `ALWAYSPUFF`/decal interaction. Verify in the
+   engine before relying on it.
+12. **Does `freezetics` interact badly with a `+SHOOTABLE` barrier?** The early return at
    `p_mobj.cpp:3948-3952` skips state advancement, so a frozen barrier cannot run a Pain or Death
    state until it is unfrozen. Clearing `freezetics` from `DamageMobj` should cover it; untested.

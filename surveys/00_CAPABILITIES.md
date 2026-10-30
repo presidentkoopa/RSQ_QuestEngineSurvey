@@ -113,8 +113,35 @@ you are not in VR and both hand poses collapse to the viewpoint. The engine bran
 itself throughout `src/playsim/p_map.cpp` (`:4597`, `:4647`, `:4784`, `:4888`, `:5185`, `:5219`,
 `:5649`) and `src/playsim/p_actionfunctions.cpp:1302`.
 
-Scale: `vr_vunits_per_meter` is 34 (`hw_vrmodes.cpp:94`) — use it to convert hand separations
-and swing speeds into real-world units.
+### 1.2a Units — get this wrong and every threshold is wrong
+
+Converting a hand position to real-world metres is **not** one constant:
+
+- **Horizontal (X, Y):** divide by `vr_vunits_per_meter` = 34.0 (`hw_vrmodes.cpp:94`).
+- **Vertical (Z):** divide by `vr_vunits_per_meter` **and additionally multiply by
+  `level.pixelstretch`**, because the hand transform divides the up axis by pixelstretch
+  (`gl_openvr.cpp:1282-1292`, read into `AttackPos.Z` at `:2529`). `pixelstretch` defaults to
+  **1.2** (`src/gamedata/g_mapinfo.cpp:314`) and is script-readable
+  (`wadsrc/static/zscript/doombase.zs:479`).
+
+**Forget the vertical term and every height reads ~17% short** — a duck threshold fires late or
+never, an uppercut measures as a jab, a bow draw reads short. Horizontal lean and steering
+angles are unaffected, which is why this hides so well: the signal you test first looks fine.
+
+Timing: 35 tics/s, so 1 unit/tic ≈ 1.03 m/s ≈ 2.30 mph.
+
+### 1.2b VR cvar defaults you must design against
+
+| Cvar | Default | Where | Why it matters |
+|---|---|---|---|
+| `vr_two_handed_weapons` | **true** | `hw_vrmodes.cpp:119` | the two-hand trap is ON (gotcha 10a) |
+| `vr_crouch_use_button` | **true** | `hw_vrmodes.cpp:122` | physical duck is view-only (gotcha 4) |
+| `vr_momentum` | **false** | `hw_vrmodes.cpp:120` | velocity is wiped each grounded tic (gotcha 1) |
+| `vr_enable_haptics` | **true** | `hw_vrmodes.cpp:125` | rumble is available (§1.6a) |
+| `vr_vunits_per_meter` | 34.0 | `hw_vrmodes.cpp:94` | the scale constant above |
+| `r_quakeintensity` | **0.0** | `r_utility.cpp:116` | quake view shake off in VR (§1.6a) |
+
+Note the pattern: **the three defaults most likely to break a mod are the restrictive ones.**
 
 ### 1.3 There are no velocity fields
 
@@ -463,17 +490,30 @@ surveys; each names the report that proved it.
     and an offhand gadget cannot coexist without working around this. Its *only* effects are
     nulling the other hand's weapon (`player.zs:1977-1993`) and blocking paired hand-swap
     (`:2498`); it does not enable stabilisation and does not touch rendering. (08_BOWS)
-10a. **THE TWO-HAND TRAP — read this before designing any two-handed mechanic.**
-    `vr_two_handed_weapons` stabilisation is **not** gated on `bTwoHanded`. If the player
-    presses the offhand **grip** button while the hands are within **0.50 m**, the engine sets
-    `weaponStabilised` (`gl_openvr.cpp:1716-1727`) and the offhand weapon goes dark: it fires
-    nothing (`player.zs:393-396`), checks no buttons (`p_pspr.cpp:755-758`), and renders
+10a. **THE TWO-HAND TRAP — read this before designing any two-handed mechanic. It is on by
+    default.** `vr_two_handed_weapons` defaults **true** (`hw_vrmodes.cpp:119`) and its
+    stabilisation is **not** gated on `bTwoHanded`. If the player presses the offhand **grip**
+    button while the hands are within **0.50 m**, the engine sets `weaponStabilised`
+    (`gl_openvr.cpp:1716-1727`) and the offhand weapon goes dark: it fires nothing
+    (`player.zs:393-396`, `:426`), checks no buttons (`p_pspr.cpp:755-757`), and renders
     nothing (`hw_weapon.cpp:832-835`, `:917-920`). `WF_TWOHANDSTABILIZED` is **re-asserted on
-    every state set** (`p_pspr.cpp:512-515`), so script cannot durably clear it.
-    Every two-handed pose in this survey — a bow at full draw, hands on handlebars, a
-    two-handed sword grip, sword-and-board brought together — puts the hands inside that
-    window. Detect it and warn the player, or design the pose to stay outside 0.50 m.
-    (08_BOWS, which found it)
+    every state set** (`p_pspr.cpp:512-515`, the `|=` at `:514`), so script cannot durably
+    clear it.
+    Three details that make it nastier, found by 02_VEHICLES:
+    - It latches on the **rising edge** of the grip (`gl_openvr.cpp:1718-1720`), and releasing
+      grip clears it with **no distance test** (`:1724-1726`). So moving your hands apart while
+      still holding grip does **not** release it — the failure looks arbitrary.
+    - The 0.50 m is **raw tracking-space metres** between controller poses
+      (`gl_openvr.cpp:1709-1714`) — a true physical 50 cm, no pixelstretch involved, so you can
+      check a design against real hardware dimensions.
+    - Which means: **motorcycle bars (0.65–0.85 m) are safe by construction; a car steering
+      wheel is not** — a 0.37 m wheel puts hands at 9-and-3 about 0.36 m apart, inside the trap.
+    **The robust defence is not geometry, it is to use no offhand weapon at all** — drive the
+    mechanic from `AttackPos` / `OffhandPos`, which the renderer writes and `weaponStabilised`
+    never touches, and take grab state from `BT_OFFHANDATTACK` (the trigger) rather than the
+    grip. With no offhand weapon the latch has nothing to switch off. Where you genuinely need
+    one, detect `player.WeaponState & WF_TWOHANDSTABILIZED` and warn; never try to clear it.
+    (08_BOWS found it; 02_VEHICLES §4.3a worked out the defence)
 11. **`+NOINTERACTION` is a trap** — it forces `MF_NOBLOCKMAP` (`p_mobj.cpp:3988-3992`), taking
     the actor out of the world. To hold something still *and* keep it collidable, use
     `freezetics` (`actor.zs:265`), which early-returns out of `Tick` (`p_mobj.cpp:3948-3952`)

@@ -96,9 +96,11 @@ Every threshold in §4 assumes this normalisation has already happened. Apply th
 
 ## 1. VERDICT
 
-This engine carries this topic far better than the baseline implied. Two complete tracked hands, each with its own weapon, its own psprite layer, its own state machine and its own trigger button bit, is a shipped engine feature — not a hack. Hit resolution is covered by three good primitives (`LineTrace`, `LineAttack` with absolute positioning, `BlockThingsIterator.CreateFromPos`) and the swept-chord trace between tics is a genuine and cheap fix for fast swings. Per-actor hit-stop exists as a writable field (`Actor.freezetics`), real controller rumble is reachable from script two ways, and physically ducking already shrinks the player's hitbox with no code at all.
+This engine carries this topic well. Two complete tracked hands, each with its own weapon, psprite layer, state machine and trigger button bit, is a shipped engine feature — not a hack. Hit resolution is covered by three good primitives (`LineTrace`, `LineAttack` with absolute positioning, `BlockThingsIterator.CreateFromPos`), and the swept-chord trace between tics is a genuine, cheap and complete fix for fast swings — six traces per tic makes a sabre correct. Per-actor hit-stop exists as a writable field (`Actor.freezetics`), independent per-hand shapeable rumble is reachable from script today through the quake channel, and physically ducking already shrinks the player's hitbox with no code at all.
 
-What is genuinely missing is small and nameable: no 35-Hz-beating input, no knockdown/prone state in Doom's monster model, no way to point-rumble a specific intensity curve, and no play-space yaw exposed to script (which costs you the *direction* of a head slip but not its timing). Boxing, brawling and blades are all buildable to a shippable standard. Punch-Out-style patterned opponents need their own monster classes — you cannot retrofit telegraph windows onto arbitrary third-party monsters.
+What is genuinely missing is small and nameable: no 35-Hz-beating hand history (which costs you curved gestures and nothing else), no knockdown/prone state in Doom's monster model, no ZScript binding for `VRMode::Vibrate`, and no play-space yaw (costing the *direction* of a head slip but not its timing). Boxing, brawling and blades are all buildable to a shippable standard. Punch-Out-style patterned opponents need their own monster classes — telegraph windows cannot be retrofitted onto arbitrary third-party monsters.
+
+Two things will cost a day each if the team does not read them first: `weaponStabilised` silently kills the offhand weapon whenever the hands come within 0.50 m with the grip held (§0.2(4)) — which is *every* guard, block and two-handed grip; and Doom collision is an unrotatable axis-aligned square, not a cylinder (§3.4), which rules out the hitbox-actor approach for punches outright.
 
 Bluntly: the expensive part of this topic is **tuning**, not engine capability. Budget accordingly.
 
@@ -250,7 +252,7 @@ Head *world* motion (for slips) is `p.pos - headPos[prev]` — because physical 
 | Signature | `actor.zs:805` `bool LineTrace(double angle, double distance, double pitch, int flags = 0, double offsetz = 0., double offsetforward = 0., double offsetside = 0., out FLineTraceData data = null)` | `actor.zs:804` `Actor, int LineAttack(double angle, double distance, double pitch, int damage, Name damageType, class<Actor> pufftype, int flags = 0, out FTranslatedLineTarget victim = null, double offsetz = 0., double offsetforward = 0., double offsetside = 0.)` | `doombase.zs:226` `static BlockThingsIterator CreateFromPos(double checkx, double checky, double checkz, double checkh, double checkradius, bool ignorerestricted)` | `Spawn()` + `A_SpawnItemEx` (`wadsrc/static/zscript/actors/attacks.zs:412`) |
 | Respects walls/floors | **Yes** | Yes | **No** — pure blockmap box | Yes (via `P_TryMove`) |
 | Side effects | **None** | Damage, puff, kickback, obituary, **haptic pulse** | None | Full actor: thinker, collision, missile rules |
-| Hits | First only (or override `LineTracer.TraceCallback()`, `doombase.zs:313-328`) | First only | All in the box | First blocking |
+| Hits | First only (or override `LineTracer.TraceCallback()`, `doombase.zs:313-328`) | **First `MF_SHOOTABLE` actor, with no intended-target test** — `p_map.cpp:4919-4920`, filter `:4673-4700`. A teammate or a barrel between your fist and the enemy eats the punch. | All in the box | First blocking |
 | Arbitrary start point | `TRF_ABSPOSITION` → `startpos = (offsetforward, offsetside, sz)` — `p_map.cpp:5206-5208` | `LAF_ABSPOSITION` — `p_map.cpp:4876-4884` | Native | Native |
 | Auto hand origin + direction | `TRF_USEWEAPON \| TRF_ISOFFHAND` — `p_map.cpp:5185-5200` | `LAF_ISOFFHAND` (always, when `OverrideAttackPosDir`) — `p_map.cpp:4784-4800` | — | — |
 | Cost | One `FPathTraverse` — same order as a hitscan bullet | Same plus puff spawn + damage path | One blockmap walk; radius 96 ≈ a 2×2 or 3×3 cell sweep (cells are 128 mu) | Spawn + destroy + a full `P_XYMovement` per tic |
@@ -260,7 +262,30 @@ Head *world* motion (for slips) is `p.pos - headPos[prev]` — because physical 
 
 Why not the others:
 - `BlockThingsIterator` is the right shape (a fat fist is a sphere, not a ray) but **it punches through walls**. You would have to follow every candidate with a `CheckSight` or a confirming `LineTrace`, at which point you have paid for both. Keep it for the one case where it wins: **projectile deflection** (§4.11), where you need *all* nearby missiles and the geometry does not matter.
-- The hitbox actor loses on every axis: cost, control, and it inherits missile semantics you will spend a day fighting. The one thing it buys — "let the engine's own collision decide" — you do not want, because Doom collision is a cylinder test against a cylinder and a fist is neither.
+- The hitbox actor loses on every axis: cost, control, and it inherits missile semantics you will spend a day fighting. The one thing it buys — "let the engine's own collision decide" — you actively do not want, for the reason below.
+
+#### Doom collision is an axis-aligned SQUARE, and it does not rotate
+
+This changes how you size every hitbox in this document, so it is stated once, here.
+
+```
+p_map.cpp:1418   double blockdist = thing->radius + tm.thing->radius;
+p_map.cpp:1419   if (fabs(thing->X() - cres.Position.X) >= blockdist
+                  || fabs(thing->Y() - cres.Position.Y) >= blockdist) return true;
+```
+and the same square test on the trace path:
+```
+p_trace.cpp:695  if (fabs(hit.X - in->d.thing->X()) > in->d.thing->radius ||
+p_trace.cpp:696      fabs(hit.Y - in->d.thing->Y()) > in->d.thing->radius) return true;
+```
+
+An actor of "radius" `r` is a **2r × 2r axis-aligned box**, not a circle. Nothing in either test reads `Angles.Yaw` — **it is unrotatable.** Consequences you must design around:
+
+- A hitbox actor of radius `r` reaches `r√2 ≈ 1.41 r` on the diagonal. A "12 mu fist" would connect at 17 mu to the north-east and 12 mu to the north. Punches would land from visibly different distances depending on which way the player happens to be facing. This alone disqualifies the hitbox-actor approach for boxing.
+- The same applies to the *targets*: an imp (`radius 20`) is a 40 × 40 box. Your sweep's `fatten` is being added to a square, not a circle, so a trace that grazes a corner registers as a clean body shot. If that matters, confirm with a real `Distance3D` against `HitActor` after the trace and reject beyond `victim.radius + fatten`.
+- A blade is long and thin; a box is not. Do **not** try to represent a blade as an actor. The segment traces in §3.5 and §4.9 are the only honest representation.
+
+Related, so you do not repeat a commonly-quoted wrong number: **the 30 units/tic `MAXMOVE` clamp is conditional and normally does not apply.** `p_mobj.cpp:2096-2106` only clamps under `COMPATF_WALLRUN` (off by default — compatmode 0, `src/d_main.cpp:621`), in water, or while crouched below 0.75. The unconditional ceiling is 5000 u/tic (`p_mobj.cpp:2107-2111`). Irrelevant to a punch; relevant if you quote it at someone.
 
 ### 3.5 The swept-chord trace — the fix for fast swings
 
@@ -333,7 +358,43 @@ p.A_QuakeEx(leftIntensity, rightIntensity, 0,
 
 Set `damrad: 0` and `damage: 0` or you will be damaging the player. `tremrad` must cover the player or `StaticGetQuakeIntensities` returns nothing (`r_utility.cpp:1063`). Remember the 150 ms channel lock (§2) — do not stack an impact pulse and a quake on the same hand in the same tic; the quake will be silently dropped.
 
-**What you cannot do:** call for a specific pulse. `VRMode::Vibrate(duration, channel, intensity)` has no VM thunk; there are zero hits for haptic/rumble/vibrate in all of `wadsrc/static/zscript`. So a jab and a liver shot buzz identically (150 ms @ 0.8), and the only shaped channel is `A_QuakeEx`'s random noise. Plan the feel around sound and hit-stop, and treat rumble as a binary "that landed" signal.
+#### The quake channel is a real, shapeable, per-hand rumble API — **label: HACK / S**
+
+This is worth stating as its own mechanic because it changes what the topic can deliver. `A_QuakeEx`'s X intensity drives the **left** controller and its Y intensity drives the **right**, independently, with **no view motion at all**:
+
+```
+r_utility.cpp:1085   if (vr_quake_haptic_level > 0.0) {
+r_utility.cpp:1086       left  = QuakePower(vr_quake_haptic_level, jiggers.Intensity.X, jiggers.Offset.X);
+r_utility.cpp:1087       right = QuakePower(vr_quake_haptic_level, jiggers.Intensity.Y, jiggers.Offset.Y);
+r_utility.cpp:1090       vrmode->Vibrate(10, 0, (float)left);     // LEFT
+r_utility.cpp:1091       vrmode->Vibrate(10, 1, (float)right);    // RIGHT
+```
+and the camera shake that would normally ride along is off by default in VR — `r_quakeintensity` is `0.0f` with the literal comment *"Defaulted to 0 for VR"* (`r_utility.cpp:116`), read as `quakeFactor` at `:1066`.
+
+So: intensity in X for the left fist, Y for the right, short duration, zero damage radius. **A punch now lands in the fist that threw it.** Same for a clash on the hand holding the blade (§4.10), and for a guard absorbing a hit (§4.4).
+
+Because `Vibrate` here is hard-coded to a 10 ms pulse (`r_utility.cpp:1090-1091`), the pulses expire every frame and therefore **chain** — which is what makes the channel *shapeable*. Re-fire with a falling intensity each tic and you get an envelope:
+
+```zscript
+// Shaped per-hand rumble. Call once per tic from the token's DoEffect while rumbleTics > 0.
+// Jab:        peak 0.55, 3 tics, sharp decay   -> a tap
+// Heavy cross: peak 1.00, 7 tics, slow decay   -> a swell
+double k = double(rumbleTics) / rumbleLen;
+double amp = rumblePeak * (k ** rumbleShape);          // shape 2.5 = sharp, 0.7 = swell
+p.A_QuakeEx(leftHand ? amp : 0, leftHand ? 0 : amp, 0,
+            1 /*duration tics*/, 0 /*damrad*/, 512 /*tremrad*/, "",
+            QF_SCALEDOWN, damage: 0);
+rumbleTics--;
+```
+
+**Caveats, all of which must be in the code:**
+- `vr_quake_haptic_level` is a **user cvar** (default 0.8, `hw_vrmodes.cpp:127`). Read it with `CVar.GetCVar` (`doombase.zs:82`), and if it is 0, degrade gracefully — fall back to sound and hit-stop, and do not pretend the feedback happened.
+- A user who has **raised `r_quakeintensity`** gets camera shake along with every one of your punches. Keep `tremrad` tight (512) and intensities modest so that is survivable rather than emetic.
+- `QuakePower` returns a **random** value in `[-intensity, +intensity]` (`r_utility.cpp:911-921`), so a single frame is noise; the *envelope* across tics is what the hand feels. Do not expect a clean waveform.
+- This is the OpenVR backend (`OpenVRHaptics::Vibrate` `gl_openvr.cpp:517-528`), so it inherits the backend caveat in §0 and `00_CAPABILITIES.md` §0.
+- Do not stack this with a `LineAttack` impact pulse on the same hand in the same tic — the 150 ms pulse holds the channel (`gl_openvr.cpp:519-523`) and silently swallows your envelope. **Pick one per hand per event.** For melee, prefer the quake envelope and pass `damage` through `DamageMobj` rather than `LineAttack` when you want full control.
+
+**What you still cannot do:** set an explicit duration and intensity in one call. `VRMode::Vibrate(duration, channel, intensity)` has no VM thunk; there are zero hits for haptic/rumble/vibrate in all of `wadsrc/static/zscript`. The envelope above is a per-tic reconstruction of something the engine could expose directly, and it costs you a 28 ms quantisation floor. See W2.
 
 ### 3.8 Three playsim traps that will eat a day each
 
@@ -935,11 +996,12 @@ Use a **deterministic** table, not `A_Jump`. Punch-Out is about learnability; ra
 | # | Wall | The exact missing piece | Severity |
 |---|---|---|---|
 | W1 | **No sub-tic hand history.** Script sees only the newest pose. Fast gestures, curvature, flicks and true swing arcs are lost between tics. | A C++-side ring buffer of per-frame `AttackPos/OffhandPos/angles` with a ZScript accessor (`GetHandSample(int tics_ago)` / `GetHandSampleCount()`). The data already exists at render rate — it is simply discarded each frame at `hw_vrmodes.cpp:442-445`. | High for gestures, **low for everything else** — the swept-chord trace (§3.5) already recovers correct hit testing. |
-| W2 | **No direct haptic call from ZScript — the highest-value engine addition for this topic.** The hardware path is real and working (`OpenVRMode::Vibrate` `gl_openvr.h:121-124` → `OpenVRHaptics::Vibrate` `gl_openvr.cpp:517-528` → `TriggerHapticPulse` `:546`); only `VR_HapticEvent` is a stub (`qzdoom_common.cpp:65-67`). But `VRMode::Vibrate` (`hw_vrmodes.h:94`) has **no VM thunk**, and there are zero hits for haptic/rumble/vibrate anywhere in `wadsrc/static/zscript`. | A single `DEFINE_ACTION_FUNCTION` exposing `Vibrate(duration, hand, intensity)`. **This is a binding, not a feature** — the implementation already exists and already runs. | **Medium for a boxing mod.** Every punch buzzes identically (150 ms @ 0.8), a jab cannot be distinguished from a liver shot by feel, and the 150 ms channel lock (`gl_openvr.cpp:519-523`) means impact pulses swallow each other during a combo. Two indirect paths exist (§3.7) and are shippable, but "a jab feels like a hook" is a real quality ceiling. |
+| W2 | **No direct haptic call from ZScript — still the highest-value engine addition for this topic.** `VRMode::Vibrate` (`hw_vrmodes.h:94`) has **no VM thunk** and there are zero hits for haptic/rumble/vibrate anywhere in `wadsrc/static/zscript`, even though the hardware path is real and working (`gl_openvr.h:121-124` → `gl_openvr.cpp:517-528` → `TriggerHapticPulse` `:546`). | A single `DEFINE_ACTION_FUNCTION` exposing `Vibrate(duration, hand, intensity)`. **This is a binding, not a feature** — the implementation already exists and already runs. | **Low–medium, not blocking.** The `A_QuakeEx` channel (§3.7) gives independent per-hand, per-tic, shapeable rumble today, so a jab *can* be told from a cross by feel. What the binding would buy: no dependence on a user cvar, no risk of camera shake for users who raised `r_quakeintensity`, sub-tic pulse lengths instead of a 28 ms floor, and no abuse of the earthquake system. |
 | W2b | **`weaponStabilised` cannot be suppressed.** Grip + 0.50 m silently kills the offhand weapon's firing, buttons and rendering, and `WF_TWOHANDSTABILIZED` is re-asserted on every `P_SetPsprite` (`p_pspr.cpp:512-515`). | Either a `+Weapon.NoStabilise` flag, or gating the whole mechanism on `bTwoHanded`, or making the bit script-writable. | **High** if you want dual-wield blades or any offhand weapon used at guard distance. Zero if the fists-are-not-weapons design (§0.2(4)) is followed. |
 | W3 | **No play-space yaw in script.** `playerYaw` (`src/QzDoom/qzdoom_common.cpp:27`, written `:89`) is not exposed. | A readonly `Actor.PlayspaceYaw` double. | Low. Costs you the clean separation of physical lean from stick input (§4.4). Workaround given. |
 | W4 | **No knockdown / prone model in Doom actors.** No state, no flag, no size hook that survives a `SetState`. | Nothing in the engine; this is a content-model gap. | Medium. Solvable for your own classes (§4.7); not retrofittable. |
 | W5 | **`+Weapon.TwoHanded` clears the other hand's weapon** (`player.zs:1980-1992`). You cannot have "two hands on one sword" expressed as two weapons. | A flag that means "occupies both hands visually but keeps both psprite layers". | Low — `WF_TWOHANDSTABILIZED` (`constants.zs:1242`) already gives you two-handed *grip detection* without the flag. Just don't use `+TwoHanded`. |
+| W5b | **No player knockback without opt-in.** `A_ChangeVelocity` is a no-op on the player (`actions.zs:63-79`, `vr_recoil` default false) and `MovePlayer` erases `vel.XY` every grounded tic (`player.zs:1373-1383`, `vr_momentum` default false). | Nothing — this is deliberate anti-nausea design. | None. `Vel` + `player.keepmomentum = true` (§3.8) is the sanctioned route and works. |
 | W6 | **Both hands collapse to the body centre on non-gameplay frames** (`hw_vrmodes.cpp:442-443` + the `gl_openvr.cpp:1704` guard). | A validity flag, or leaving the last-good pose in place. | Low — the spike filter in §3.2 handles it completely, but **every** consumer must have it. |
 | W7 | **`r_quakeintensity` defaults to 0 in VR** (`r_utility.cpp:116`). Camera shake for hit feel is off. | Nothing — this is deliberate and correct (camera shake in VR is nausea). | None. Treat `A_QuakeEx` as a haptics API, not a camera API. Use psprite/model motion for visual impact instead. |
 | W8 | **Could not find** any ZScript access to raw controller button state beyond the `BT_*` bitmask — no grip-button bit, no trigger *analogue* value, no thumbstick axes. The OpenVR grip button is consumed entirely inside `gl_openvr.cpp:1716-1722`. | Exposing the controller state struct, or at minimum an analogue trigger float per hand. | Medium for "squeeze to grip harder"; low otherwise, since `BT_OFFHANDATTACK`/`BT_USER1..4` cover binary needs. |

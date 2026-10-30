@@ -101,11 +101,16 @@ about 69 mph — enough for the reference feel either way (§4.7 does the arithm
 engine's own `vr_vunits_per_meter`). Tunnelling is already solved by radius-based
 substepping inside `P_XYMovement` (`p_mobj.cpp:2166-2192`), and jumps are lossless because
 airborne friction is skipped at default `sv_aircontrol` (`p_mobj.cpp:2447-2463`,
-`g_level.cpp:1928-1931`). Both hands are fully tracked in world space
-(§0), so two-handed handlebar steering, lean, wheelies,
-gear levers, hardpoint guns and per-part damage are all BUILDABLE on top of that; the only
-true WALL in the list is a view-locked cockpit model, because a psprite's VR transform is
-chosen by which hand owns the weapon and there is no head slot (`src/r_data/models.cpp:222`).
+`g_level.cpp:1928-1931`). Both hands are fully tracked in world space (§0), so two-handed
+handlebar steering, lean, wheelies, gear levers, hardpoint guns and per-part damage are all
+BUILDABLE on top of that — provided you route around **§4.3a**, the default-on weapon
+stabilisation that silently deletes the offhand weapon whenever the offhand grip is pressed
+with the hands under 0.50 m apart (`gl_openvr.cpp:1716-1727`), which is exactly the
+handlebar gesture and is not clearable from script. The remaining true WALLs are a
+view-locked cockpit model (a psprite's VR transform is chosen by which hand owns the weapon,
+with no head slot — `src/r_data/models.cpp:222`) and script-callable haptics: rumble works in
+the engine (`gl_openvr.cpp:517-528`) but no ZScript binding exists, which for a driving game
+costs the entire tactile channel.
 
 ---
 
@@ -898,6 +903,13 @@ prove the collision budget — in one pk3, no engine change, no map work.
 5. **Handlebar grips:** a `+OFFHANDWEAPON` weapon holding the left grip model and an ordinary
    ready weapon holding the right. They track the real hands with zero code
    (`src/r_data/models.cpp:222`).
+   **But keep the bars wider than 0.50 m, or the left grip model will silently vanish** —
+   this step is the exact gesture described in §4.3a, and the offhand psprite is skipped
+   entirely while stabilisation is latched (`hw_weapon.cpp:832-835`). Realistic bike bars
+   (0.65 m+) are safe. If you see the left grip disappear when you squeeze, that is this and
+   not your MODELDEF. Alternative that cannot hit the trap at all: drop the offhand weapon,
+   draw **both** grips as world model actors positioned from `AttackPos`/`OffhandPos` each
+   tic with `SetOrigin(pos, true)`.
 6. **The one measurement that decides everything:** log `Vel.Length()`, `player.onground`,
    `player.crouchfactor` and a tic-time sample while driving a long straight on a wall-dense
    map at `maxSpeed = 30` (69 mph), then `60`, then `120` units/tic. You are measuring

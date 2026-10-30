@@ -134,8 +134,10 @@ VR the view yaw is overwritten from the HMD every frame (`hw_openxrdevice.cpp:75
 angle, by overriding `MovePlayer` (`player.zs:1340`) and thrusting along a mod-owned `legsAngle`.
 You also cannot rotate the VR camera from script at all (roll/pitch clobbered,
 `hw_openxrdevice.cpp:740-741`): no screen-shake, no view-kick, no forced look — a **WALL**, and a
-comfort blessing. The stomp feedback instead comes through a route the baseline flagged as
-unproven: `A_QuakeEx` reaches the controllers' rumble via `src/rendering/r_utility.cpp:1084-1094`.
+comfort blessing. Stomp feedback therefore has to come from the cockpit model, audio, and one
+HACK-grade rumble route — `A_QuakeEx` reaches `VRMode::Vibrate` via
+`src/rendering/r_utility.cpp:1084-1090`, which is implemented on the OpenVR path but unbound to
+script and path-dependent (§0.6, §0.7); treat it as the thing to test first, not to design on.
 Both hands being readable (§0.1) makes the cockpit genuinely two-handed: left hand on the throttle,
 right on the stick, each tracked in world space.
 
@@ -221,9 +223,15 @@ the way to the eye.
   `VR_HapticEvent("rumble_front"/"rumble_back", …)` (`r_utility.cpp:1084-1094`), with `left`/`right`
   derived from the quake's X and Y intensity.
 
-This **supersedes the caution in BASELINE §4** for one specific case: a mod *can* fire controller
+This **qualifies the caution in BASELINE §4** for one specific case: a mod *can* fire controller
 rumble, by raising a quake whose intensity it chooses, left and right separately. It is a HACK
-(the only lever is a quake), but it is a live, cited call path.
+(the only lever is a quake) over a cited call path, and its liveness is **path-dependent**:
+`VRMode::Vibrate` is a real implementation on OpenVR (`gl_openvr.cpp:517-528`, gated
+`vr_enable_haptics`), while the OpenXR override calls `QzDoom_Vibrate`
+(`hw_openxrdevice.cpp:757`), which has **no definition in this repo**. `VR_HapticEvent` — the
+other call in that same block — is an **empty stub** (`qzdoom_common.cpp:65-67`) and does nothing
+at all. Given §0.7 (OpenVR is the compiled path here), the rumble should work; verify before
+shipping a mechanic that depends on it.
 
 ### 2.5 Engine cvars are menu-only for a mod
 
@@ -310,7 +318,7 @@ does not "use" actors — but it proves the hand pose is already wired into play
 | Two weapon state machines | `OffhandWeapon` + `PSP_OFFHANDWEAPON` + `CheckWeaponButtons(hand)` | BASELINE §2; `player.zs:588` |
 | Cockpit geometry | spawned actors + MODELDEF, repositioned per tic; `Actor.Scale` | `models.cpp:71-200`, `:842-932` |
 | Swap a model at runtime (damage states) | `A_ChangeModel(modeldef, modelindex, …)` | `actor.zs:1232` |
-| Rumble | `A_QuakeEx` with chosen X/Y intensity | `actor.zs:1284`; `r_utility.cpp:1084-1094` |
+| Rumble (HACK, verify first) | `A_QuakeEx` with chosen X/Y intensity → `VRMode::Vibrate` | `actor.zs:1284`; `r_utility.cpp:1084-1090`; impl `gl_openvr.cpp:517-528`; §0.6 |
 | Screen tint (heat, alarms) | `A_SetBlend(color, alpha, tics, …)` | `actor.zs:1229` |
 | Enter/exit | `MorphPlayer` / `UndoPlayerMorph` | `player_morph.zs:98`; `morph.zs:139` |
 | Eject velocity / reposition | `Warp()`, `Vel`, `SetOrigin` | `actor.zs:942`, `:753` |
@@ -402,7 +410,29 @@ traces (`p_map.cpp:6170-6187`) hit line specials only, which the hard rule puts 
 **Feel knobs:** grab radius (BASELINE §3: 35 Hz sampling, so make the capture volume generous and
 sticky — hysteresis between grab and break radius), lever travel in cm → value curve, a per-tic
 `A_QuakeEx` tick-tick at detents for rumble feedback (§4.7), audio detents.
-**Feel knobs (cont.):** per-hand grab radius, detent spacing, which hand owns which control.
+**The 0.50 m trap — this is a design constraint, not a footnote.** If the left-hand control is
+driven by an **offhand weapon**, then the moment the player grips it with the hands closer than
+**0.50 m** apart, `weaponStabilised` latches (`gl_openvr.cpp:1716-1727`) and that offhand weapon
+goes silent: no fire (`player.zs:393-396`), no button checks (`p_pspr.cpp:755-758`), no psprite
+(`hw_weapon.cpp:832-835`, `:917-920`), with the flag re-asserted on every state set
+(`p_pspr.cpp:512-515`) so script cannot durably clear it. A twin-stick or yoke cockpit is exactly
+the geometry that triggers it. Three mitigations, in order of preference:
+
+1. **Drive the controls from hand positions, with no offhand weapon involved** — compare
+   `OffhandPos` / `AttackPos` to control-actor positions in the pawn's `Tick` and read the grip as
+   a `cmd.buttons` bit rather than a weapon fire state. Then nothing about the offhand weapon
+   state machine is load-bearing and the trap is simply absent. **This is the recommended build**
+   and is what §6 prototypes.
+2. **Space the controls more than 0.50 m apart.** Entirely realistic for a mech — real heavy-plant
+   and cockpit yokes put the grips 0.6–0.8 m apart, i.e. **20–27 map units** at 34 units/m (§0.8).
+   Design the console that way and the trap never arms.
+3. **Detect and degrade:** test `player.WeaponState & WF_TWOHANDSTABILIZED` and surface a cockpit
+   warning rather than letting the left stick silently die.
+Do **not** plan on clearing `vr_two_handed_weapons` from the mod — it is an engine cvar and
+menu-only (W8).
+
+**Feel knobs (cont.):** per-hand grab radius, detent spacing, which hand owns which control,
+console width (≥ 0.5 m between grips).
 **Label:** BUILDABLE — **cost M**. Two-handed is now genuinely available (§0.1); the 35 Hz sampling
 and the absence of hand-velocity fields (BASELINE §1b, §3) still mean a *grab* must be a button
 plus proximity, never a detected lunge.
@@ -469,8 +499,11 @@ All three are script bookkeeping; what matters is what each binds to.
 rotation and camera-bob roll are all discarded in VR.
 
 **The non-view alternatives, in the order they carry weight:**
-1. **Haptics** — alternating controller rumble per stride (below). The strongest substitute, and
-   the only one that lands on the body.
+1. **Haptics, via the quake route only** — alternating controller rumble per stride (below). The
+   strongest substitute and the only one that lands on the body, but it is a HACK on a single
+   lever and it is the one item here I would not ship unverified: there is **no ZScript binding**
+   to `VRMode::Vibrate`, and the stub situation differs by path (§0.6, §0.7). If it proves dead in
+   the owner's build, items 2–4 carry the mechanic on their own.
 2. **World-space effects** — the cockpit actors (§4.3) drop and spring back; dust/debris actors
    spawned at the foot; a brief `A_SetBlend` flash for a hard landing (`actor.zs:1229`).
 3. **psprite shake** — `psp.x/psp.y` jitter on the hand layers (`player.zs:2954-2955`), i.e. the
@@ -487,7 +520,8 @@ Script *can* translate the VR view: `SetViewPos` (`actor.zs:1278`) and quake pos
 vertical-only stomp drop of 2–4 units is tolerable; anything lateral is the classic nausea source —
 don't.
 
-**Stomp design.** In `Tick`, track walked distance; every stride length, fire
+**Stomp design** (rumble half is HACK and conditional — see §0.6/§0.7; the visual/audio half stands
+on its own). In `Tick`, track walked distance; every stride length, fire
 `A_QuakeEx(intensityX, intensityY, intensityZ, duration, damrad, tremrad, "mech/step", …)`
 (`actor.zs:1284`). The player feels it as **controller rumble**, because
 `vr_quake_haptic_level` (default 0.8, `hw_vrmodes.cpp:127`) routes the quake's X and Y intensities
@@ -542,10 +576,11 @@ of `r_viewpoint.camera->player`.** (That is a two-line engine change in REMA; he
 | W4 | No script 3D translation of a psprite model | `psp->x/y` are consumed as rotations; no per-actor model offset exists in `DActorModelData` | `hw_weapon.cpp:108`; `src/playsim/actor.h:732-749` |
 | W5 | `player.camera` on a non-player actor kills VR hand tracking | VR pose writers keyed on `r_viewpoint.camera->player` | `hw_openxrdevice.cpp:551`, `:570`, `:432-437` |
 | W6 | A tall pawn does not fit stock maps, and we may not edit maps | `tm.ceilingz − tm.floorz < thing->Height` → blocked, no exception | `src/playsim/p_map.cpp:1997`, `:2413` |
-| W7 | The eye is clamped to `ceilingz − 4` indoors, twice | `player.zs:714`; `r_utility.cpp:1127-1134`. (The HMD term is added *after* the clamp, `hw_entrypoint.cpp:182`, so your real head can still poke through the ceiling.) |
+| W7 | The eye is clamped to `ceilingz − 4` indoors, twice | An opt-out on the view clamp for a tall pawn (`VPSF_ALLOWOUTOFBOUNDS` covers only `ViewPos` cameras, `r_utility.cpp:769`). The HMD term is added *after* the clamp (`hw_entrypoint.cpp:182`), so your real head can still poke through the ceiling | `player.zs:714-721`; `r_utility.cpp:1127-1141` |
 | W8 | Engine cvars (`vr_vunits_per_meter`, `vr_crouch_use_button`, `r_quakeintensity`) are menu-only for a mod | `CVAR_MOD` check in `CVar.SetFloat` | `vmnatives.cpp:981-991` |
-| W9 | Haptics still have no direct script entry point | A ZScript thunk to `VRMode::Vibrate` / `VR_HapticEvent`; quakes are the only route | BASELINE §4; `r_utility.cpp:1084-1094` |
+| W9 | Haptics have **no direct script entry point** — and with W2 making view shake impossible, this is the topic's most costly gap | **A ZScript binding over the existing `VRMode::Vibrate`** — an implementation already exists on the live path (`gl_openvr.cpp:517-528`, `gl_openvr.h:121-124`, gated `vr_enable_haptics`), so this is a binding, not a feature. `VR_HapticEvent` is a separate matter: an empty stub (`qzdoom_common.cpp:65-67`). The only script-reachable route today is a quake (`r_utility.cpp:1084-1090`), which is HACK-grade | BASELINE §4; §0.6 |
 | W10 | No room-scale Z: your real duck/stand does not move the pawn's Z | The positional code is XY-only and restores Z explicitly; head height is an eye offset (+ `crouchfactor` in the non-default branch) | `hw_openxrdevice.cpp:669-686`, `:219`, `:574-579`; `gl_openvr.cpp:2613-2632`. **Not a blocker for this topic** — see §0: the eye still follows the script-set base height |
+| W11 | Two-hand stabilisation silently kills an offhand-weapon-driven cockpit control when the hands come within 0.50 m | A gate on `bTwoHanded` (or any opt-out a mod can set), instead of unconditional `vr_two_handed_weapons` + grip + distance | `gl_openvr.cpp:1716-1727` (`:1722`); `player.zs:393-396`; `p_pspr.cpp:512-515`, `:755-758`; `hw_weapon.cpp:832-835`, `:917-920`. **Avoidable in design** — §4.4 mitigations |
 
 ### What breaks, concretely
 
@@ -581,9 +616,10 @@ Four files, one evening, and it settles the only question that matters:
 3. In `MechPawn.Tick`: every 12 tics of walked distance, `A_QuakeEx(2, 0, 0, 8, 0, 512,
    "world/quake")` on the left stride and `A_QuakeEx(0, 2, 0, 8, 0, 512, …)` on the right.
 4. Three cockpit actors (`+NOINTERACTION +NOBLOCKMAP +NOGRAVITY`, any MODELDEF model) repositioned
-   each tic at fixed local offsets: a frame, a throttle at the offhand's rest position (grab on
-   `OffhandPos` + offhand fire button) and a stick at the main hand's (grab on `AttackPos` + main
-   fire button), both gated on `OverrideAttackPosDir`.
+   each tic at fixed local offsets: a frame, a throttle at the offhand's rest position and a stick
+   at the main hand's, **at least 20 map units apart** (§0.8, §4.4). Grab = proximity to
+   `OffhandPos` / `AttackPos` (gated on `OverrideAttackPosDir`) **plus a `cmd.buttons` bit — no
+   offhand weapon anywhere in the design**, so W11 cannot arm.
 
 **What it proves, in order:** (a) the eye really is at mech height and the HMD adds to it, not over
 it — stand up and confirm the view rises *from* 240, not *to* 1.64 m; (b) the stomps rumble the
@@ -623,7 +659,17 @@ wrong and the mech is dead on this engine.
 7. **The §0 disagreement needs one in-engine test to close**, not more reading. Step (a) of §6
    settles it in one launch. I am confident in the citations; I am not willing to call it proven
    without the headset, per the owner's standing rule.
-8. **Does a psprite layer whose caller is cleared, or whose caller is neither weapon, still get a
+8. **Does the owner's build compile `USE_OPENVR`, `USE_OPENXR`, or neither?** Both are build-time
+   options and `ENABLE_OPENVR` defaults to NO (`src/CMakeLists.txt:418`); `USE_OPENXR` is defined
+   by no CMake file in this tree (§0.7). Everything VR-specific in this report is conditional on
+   that answer. *Settles it:* the build's compile definitions, or one `vr_` cvar's presence at the
+   console.
+9. **Does the quake→rumble route actually buzz the controllers in that build?** `VRMode::Vibrate`
+   is implemented on OpenVR but the OpenXR override calls an undefined `QzDoom_Vibrate`, and
+   `VR_HapticEvent` is a stub (§0.6). *Settles it:* `A_QuakeEx(2,0,0,8,0,512)` in a test state with
+   `vr_enable_haptics 1` — feel the left controller. This is a five-minute test and the whole
+   stomp-feedback design leans on it, so do it before §6 step (b).
+10. **Does a psprite layer whose caller is cleared, or whose caller is neither weapon, still get a
    hand matrix?** `hw_weapon.cpp:256` evaluates `GetCaller() == OffhandWeapon`, so a null caller
    yields hand 0. I did not test whether such a layer renders at all after
    `p_pspr.cpp:310-318`'s culling. If some caller value produced a *view-locked* layer, W3 would

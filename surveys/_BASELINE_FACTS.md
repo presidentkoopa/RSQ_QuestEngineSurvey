@@ -20,19 +20,45 @@ This is the whole list. There is nothing else.
 | `Actor.OffhandRoll` (double, readonly) | `actor.zs:274` | `actor.h:1664` | `vmthunks_actors.cpp:2193` |
 | `Actor.OffhandAngle` (double, readonly) | `actor.zs:275` | `actor.h:1663` | `vmthunks_actors.cpp:2194` |
 | `Actor.OffhandDir(actor, angle, pitch)` | `actor.zs:859` | `actor.h:1666` (fn ptr) | — |
+| `Actor.AttackPos` (vector3, readonly) | `actor.zs:268` | `actor.h:1654` | `vmthunks_actors.cpp:2187` |
+| `Actor.AttackPitch` (double, readonly) | `actor.zs:269` | `actor.h:1655` | `vmthunks_actors.cpp:2188` |
+| `Actor.AttackRoll` (double, readonly) | `actor.zs:270` | `actor.h:1657` | `vmthunks_actors.cpp:2189` |
+| `Actor.AttackAngle` (double, readonly) | `actor.zs:271` | `actor.h:1656` | `vmthunks_actors.cpp:2190` |
+| `Actor.OverrideAttackPosDir` (bool, readonly) | `actor.zs:276` | `actor.h:1652` | `vmthunks_actors.cpp:2186` |
 | `PlayerInfo.PlayInVR` (bool, readonly) | `wadsrc/static/zscript/actors/player/player.zs:3136` | `src/playsim/d_player.h:502` | — |
 
-### 1a. There is no main-hand pose field. This is the single most important fact in the survey.
+### 1a. BOTH HANDS ARE FULLY TRACKED. (Corrected 2026-10-30.)
 
-`Offhand*` exists; there is no `MainhandPos`, no `WeaponhandPos`, no `WeaponAngles` in ZScript.
-The **weapon hand is the aim**: its pose reaches script as the player's own
-`angle` / `pitch` / `roll` and view position, because the renderer folds the weapon
-controller into the viewpoint (`src/common/rendering/hwrenderer/data/hw_vrmodes.cpp:442-444`,
-where `AttackPos`/`AttackAngle`/`AttackPitch` are set alongside the offhand values).
+**An earlier draft of this file claimed there was no main-hand pose. That was wrong.**
+It was caught by the grapple survey and verified by hand. The error came from reading
+`hw_vrmodes.cpp:442-444` — which is the **non-VR fallback path**, where `AttackPos` is simply
+set equal to `OffhandPos` and the player position — and mistaking it for the live VR path.
 
-Consequence for every topic: **you get one freely-readable hand (the offhand) and one hand
-that you can only read as "where the player is aiming."** Any two-handed mechanic has to be
-designed around that asymmetry, not against it.
+The live VR paths write a real, independent weapon-hand controller transform, exactly
+symmetric with the offhand:
+
+```
+src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:586-597   AttackPitch/Angle/Roll/Pos from weaponangles[] and weaponoffset[]
+src/common/rendering/hwrenderer/data/hw_openxrdevice.cpp:600-611   OffhandPitch/Angle/Roll/Pos from offhandangles[] and offhandoffset[]
+src/rendering/gl/stereo3d/gl_openvr.cpp:2525-2537                  the OpenVR path, same shape
+```
+
+So the real picture is:
+
+- **Main hand** — `AttackPos`, `AttackAngle`, `AttackPitch`, `AttackRoll`. Full 6DOF.
+- **Offhand** — `OffhandPos`, `OffhandAngle`, `OffhandPitch`, `OffhandRoll`. Full 6DOF.
+- **Head** — `HmdPosition`.
+- Direction helpers for each: `AttackDir` (`actor.h:1659`) and `OffhandDir` (`actor.zs:859`).
+
+**Two independently tracked hands plus a tracked head.** Any mechanic needing two hands doing
+different things in free space is viable. Boxing with both fists, two-hand handlebars, a bow
+drawn between two hands, hand-over-hand climbing — none of these are blocked.
+
+`OverrideAttackPosDir` (`actor.zs:276`) is the flag saying the VR override is live; it is set
+to `!puristmode && (IsVR() || vr_override_weap_pos)` at `hw_vrmodes.cpp:438`, and the engine
+branches on it all through `p_map.cpp` (`:4597`, `:4647`, `:4784`, `:4888`, `:5185`, `:5219`,
+`:5649`) and `p_actionfunctions.cpp:1302`. **Gate your hand-reading code on it** — when it is
+false you are not in VR and the Attack/Offhand values are degenerate.
 
 ### 1b. There are no hand or head velocity fields.
 

@@ -1,0 +1,99 @@
+// RSQ SABER. Your look and your alt fire are yours (userinfo: every machine sees your
+// choice); what it does to the game is the server's.
+//
+// 137 CVARS BECAME 26 (2026-10-30). The old file carried 137; 97 of them were numbers whose
+// shipped value was the designed one -- the old "MORE KNOBS" block said so itself: "EVERY DEFAULT
+// BELOW IS THE LITERAL IT REPLACES, to the digit, so nothing changes until he moves it". Those 97
+// are gone from here and live as literals in zscript.txt, where a fixed value belongs. 15 more were
+// dead, vestigial or a second name for something that already existed. What is left is the 11 on
+// the menu and the 15 kept deliberately unexposed.
+//
+// NOTHING BREAKS WHEN A CVAR LEAVES THIS FILE. UBQS_Data.F / .I return the fallback the call site
+// passes when the name is not found (zscript.txt:191-204), and the fallback was checked against the
+// old default for all 119 reads that carry one: 118 matched to the digit. The seven ubqs_glow_*
+// prediction names fell back to the GLOW_* constants they were made from (zscript.txt:1306-1321),
+// which is a no-op by construction. The CVar.FindCVar sites were read one at a time and all treat
+// "absent" as the old default (ubqs_bd_sword :5523 !bc||GetBool, ubqs_chainsaw :5529 cc&&GetBool,
+// ubqs_hitscan_guard :5631, ubqs_doppler :3148/:3184, ubqs_force_hand :5806, ubqs_dual :5541/:5670).
+// THE ONE EXCEPTION is ubqs_haptic_clash, whose call site falls back to 0 against a default of 1
+// (zscript.txt:2723) -- so that one needs a code edit, not just a deletion. See CHANGES.md Part B.
+
+// ---- THE MENU: eleven rows, one page ---------------------------------------------------------------
+server bool  ubqs_on            = true;   // the saber at all
+server int   ubqs_dual_mode     = 2;      // DEFAULT CHANGED 1 -> 2 so "Start With Dual Sabers" reads
+                                          // On out of the box: 0 one saber, 2 both always out.
+                                          // 1 (the Dual key stows and draws the second, like Brutal
+                                          // Doom's dual guns) is still honoured -- it is off the menu,
+                                          // not gone, and its bind stays in KEYCONF.
+server float ubqs_damage        = 30.0;   // the cut. The menu runs 15-60, which is 0.5x to 2.0x of this
+user  int    ubqs_locks         = 5;      // lock-on targets; the code clamps 1-8, the menu offers 1-5
+
+user  int    ubqs_color         = 0;      // main blade
+user  float  ubqs_size          = 1.0;    // main blade length. FIVE VALUES EXIST AND NO OTHERS:
+                                          // 0.70 0.85 1.00 1.15 1.30, which are 54 65 76 88 99 cm at
+                                          // vr_vunits_per_meter 34. ResolveSizeIdx snaps anything else
+                                          // to the nearest of them (zscript.txt:30, :466-478), so a
+                                          // value between two of them silently becomes one of them.
+user  int    ubqs_color_off     = 2;      // off blade
+user  float  ubqs_size_off      = -1.0;   // off blade length; -1 the same as the main hand
+user  bool   ubqs_lights_offhand = true;  // NEW. The off blade's own dynamic light. It replaces the
+                                          // hand-distance merge that used to decide this for you:
+                                          // "only the main hand's light when your blades are close
+                                          // together" was written as 40.0 MAP UNITS, and a map unit is
+                                          // 1/34 m (hw_vrmodes.cpp:94), so the cut-off was 1.17 m --
+                                          // wider than hands ever are, and the off blade was unlit in
+                                          // every normal dual-wield pose. One switch instead.
+
+server float ubqs_swing_cut     = 8.0;    // units a tic the blade must travel to cut: THE most-felt
+                                          // number. On the menu because it is the only one no single
+                                          // value can get right -- what counts as a hard swing depends
+                                          // on arm length, standing or seated, and the size of the room
+server float ubqs_blade_guard   = 6.0;    // how far off ONE blade's line an attack still counts as
+                                          // blocked, in map units. The blade is ~26 units long; your
+                                          // body is 32 across. 6 is the owner's "small hitbox" and
+                                          // against Brutal Doom it let 22 of 364 tracers through, which
+                                          // is why this stays a slider and not a literal.
+                                          // 0 NO LONGER MEANS ANYTHING: the old cone-and-percentage
+                                          // roll it used to fall back to is gone (it was unreachable
+                                          // at any non-zero value, which is every value anyone ran).
+
+// ---- DELIBERATELY NOT ON THE MENU ------------------------------------------------------------------
+// These fifteen keep working and keep their full range. They are off the page because the menu is one
+// screen and these are either a developer's switch, a compatibility answer the engine already gives,
+// or a choice a player would never find twice. Set them from the console or the ini; nothing hides
+// them and nothing resets them behind your back.
+
+server bool  ubqs_start         = true;   // begin holding one. false = it exists, you pick it up.
+                                          // "Sabers Off" covers the common case, so this is not a row
+user  bool   ubqs_world_saber   = false;  // the whole saber drawn in the world as one actor. SETTLED,
+                                          // AND KEPT: the blades become world sabers when they CROSS
+                                          // to deflect, which is the entire point of the path, and the
+                                          // crossed case brings it up on its own whatever this says
+                                          // (zscript.txt:1662-1663). It is also the lever for the
+                                          // SteamVR two-hand-grip fix (03_SABER_AND_SAW.md 2.6).
+                                          // Not a row because it should not be a choice.
+user  int    ubqs_lights        = 1;      // blade light detail: 0 none, 1 one light per blade (Quest),
+                                          // 2 two per blade, 3 three (PC). The menu's off-blade switch
+                                          // is a separate question; 2 and 3 live on here
+user  int    ubqs_deflect_aim   = 1;      // where a turned shot goes: 1 where you look, 0 at the
+                                          // shooter, 2 a true mirror off the blade. Three real answers
+server float ubqs_deflect_lead  = 3.0;    // tics of a shot's own path the blade is tested against. 3
+                                          // turns shots two tics early, including ones that would have
+                                          // missed; only the headset can say whether that reads psychic
+user  float  ubqs_throw_min     = 1.5;    // how hard a throw must be. Body-dependent, like swing_cut,
+                                          // but a throw that does not go is visible and a cut that does
+                                          // not land is not -- so this one stays off the page
+server int   ubqs_force         = 1;      // the Force at all: push, pull, choke, jump
+server int   ubqs_force_jump    = 1;      // it changes how you move, so it is worth being able to stop
+user  float  ubqs_force_gesture = 2.0;    // how sharp a push or pull gesture must be
+user  float  ubqs_gesture_straight = 0.55; // and how straight (a dot, not degrees -- 0.55 is not the
+                                          // cosine of any round number)
+user  int    ubqs_saber_sound   = 0;      // 0 Graflex, 1 Vader (Rogue One), 2 Rogue Rebel
+user  int    ubqs_haptics       = 1;      // controller buzz at all. The cut and the clash used to have
+                                          // their own switches; they were subsets of this one
+user  int    ubqs_lefty         = -1;     // which controller the rumble goes to: -1 follow the engine's
+                                          // handedness (it reads vr_control_scheme in single player),
+                                          // 0 right-handed, 1 left-handed. The engine already answers
+                                          // this, which is why it is not a row
+user  int    ubqs_remote_level  = 2;      // the training remote's starting level
+user  int    ubqs_diag          = 0;      // 1 blade-line dots, 2 glow telemetry (log + overlay)

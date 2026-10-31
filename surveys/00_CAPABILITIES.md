@@ -584,6 +584,14 @@ surveys; each names the report that proved it.
     nothing (`hw_weapon.cpp:832-835`, `:917-920`). `WF_TWOHANDSTABILIZED` is **re-asserted on
     every state set** (`p_pspr.cpp:512-515`, the `|=` at `:514`), so script cannot durably
     clear it.
+    **The script-visible flag is only as fresh as the last weapon state change.**
+    `WF_TWOHANDSTABILIZED` is cleared and re-asserted in exactly one place —
+    `DPSprite::SetState` (`p_pspr.cpp:500-515`) — and only when the layer is `PSP_WEAPON` or
+    `PSP_OFFHANDWEAPON`. The C++ `weaponStabilised` updates per frame; the bit script reads
+    updates only when a weapon layer changes state. Usually that is every tic or few, so a
+    gate on it releases a few tics after the grip. But a weapon parked in a long or `-1`
+    duration frame can hold the bit **stale**, so never build a timeout that assumes it will
+    clear on its own. (Found while implementing the TacticalRig and LaserSight gates.)
     Three details that make it nastier, found by 02_VEHICLES:
     - It latches on the **rising edge** of the grip (`gl_openvr.cpp:1718-1720`), and releasing
       grip clears it with **no distance test** (`:1724-1726`). So moving your hands apart while

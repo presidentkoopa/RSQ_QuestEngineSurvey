@@ -19,6 +19,7 @@ resolves, the tuning knobs, and the real function names.
 | **[surveys/00_CAPABILITIES.md](surveys/00_CAPABILITIES.md)** | The shared foundation. **§0 is a go/no-go** — read it before writing code. §7 is the thirteen gotchas that silently eat prototypes. |
 | **[surveys/11_HUD_MODELS.md](surveys/11_HUD_MODELS.md)** | Who owns a psprite layer decides which hand it rides, whether it survives a weapon switch, and whether it can be a model at all. Read before building any wrist panel, gauge or held instrument. |
 | **[surveys/99_OVERLOOKED.md](surveys/99_OVERLOOKED.md)** | Mechanics nobody asked for, found while reading the source. **§1a is the best single find in the survey.** |
+| **[surveys/VR_MELEE_ON_QUESTZDOOM_2026-10-24.md](surveys/VR_MELEE_ON_QUESTZDOOM_2026-10-24.md)** | **Melee in depth.** Part One: every hand, hit, swept-test, feedback and netplay primitive ZScript can reach on stock QZD 17.3, cited to `file:line`. Part Two: UltraBadassQuestSaber, RS_ShieldSawQ and the BD22 Quest weapons compared technique by technique, with the trap table and what a fourth implementation should be. Read with [01_MELEE](surveys/01_MELEE.md). |
 
 ### The five facts that shape every design here
 
@@ -43,7 +44,7 @@ resolves, the tuning knobs, and the real function names.
 
 | If you are building | Start here | Then |
 |---|---|---|
-| **Super Punch-Out, Streets of Rage, Condemned** | [01_MELEE](surveys/01_MELEE.md) §4.1-4.8 | §0.2(4) the trap that kills fist mechanics |
+| **Super Punch-Out, Streets of Rage, Condemned** | [01_MELEE](surveys/01_MELEE.md) §4.1-4.8 | §0.2(4) the trap that kills fist mechanics; [VR_MELEE_ON_QUESTZDOOM](surveys/VR_MELEE_ON_QUESTZDOOM_2026-10-24.md) for every primitive in depth |
 | **Swordplay, lightsabers, Zelda** | [01_MELEE](surveys/01_MELEE.md) §4.9+ | §2 swept-chord tracing — this is how fast swings hit |
 | **Castlevania / Indiana Jones whip** | [05_GRAPPLE_ROPES](surveys/05_GRAPPLE_ROPES.md) §4.3 | [01_MELEE](surveys/01_MELEE.md) for the crack attack |
 | **Rocket Jockey** | [05_GRAPPLE_ROPES](surveys/05_GRAPPLE_ROPES.md) **§4.6** | its own full design; the hardest case in the survey |

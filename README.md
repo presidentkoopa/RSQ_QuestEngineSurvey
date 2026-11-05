@@ -1,4 +1,4 @@
-# QuestZDoom 1.7.3 — what you can build on it
+# QuestZDoom 17.3 — what you can build on it
 
 A teardown of emawind84's QuestZDoom (tag `qzd17.3`) answering one question per topic:
 **what can we build as a mod on this exact engine, and how?**
